@@ -17,6 +17,14 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+# Anthropic 流（仅文本块，请求未带 thinking 参数时返回，用于验证 thinking=false 无思考区）
+ANTHROPIC_TEXT_ONLY_EVENTS = [
+    '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+    '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**你好！**\\n\\n"}}',
+    '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"我没有思考区。\\n"}}',
+    '{"type":"message_stop"}',
+]
+
 # Anthropic 流：思考 + 文本（模拟 extended thinking 的增量流）
 ANTHROPIC_EVENTS = [
     '{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}',
@@ -54,8 +62,11 @@ class MockHandler(BaseHTTPRequestHandler):
                 self._send_sse(['{"type":"error","error":{"type":"overloaded_error","message":"mock 服务过载"}}'])
             elif model == "unauthorized-model":
                 self._send_json(401, {"error": {"message": "mock invalid api key"}})
-            else:
+            elif "thinking" in body:
                 self._send_sse(ANTHROPIC_EVENTS, delay=0.05)
+            else:
+                # 请求未启用 thinking：只返回文本块（真实 API 行为一致）
+                self._send_sse(ANTHROPIC_TEXT_ONLY_EVENTS, delay=0.05)
         elif self.path.endswith("/v1/chat/completions"):
             if model == "error-model":
                 self._send_sse(['{"error":{"message":"mock 服务出错"}}'])
