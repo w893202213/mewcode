@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mewcode.session import Message
 
@@ -29,7 +29,9 @@ class TextDelta:
 
 @dataclass
 class Done:
-    """流正常结束。"""
+    """流正常结束，附带需要回传的原始思考块（Anthropic 多轮要求原样回传）。"""
+
+    thinking_raw: list[dict] = field(default_factory=list)
 
 
 # 归一化流事件联合类型
