@@ -134,19 +134,24 @@ def _chat_round(
         with Live(
             indicator, console=console, refresh_per_second=10, vertical_overflow="visible"
         ) as live:
-            for event in provider.stream(session.messages):
-                if isinstance(event, ThinkingDelta):
-                    thinking_text += event.text
-                    live.update(
-                        _stream_renderable(thinking_text, "".join(reply_buffer), indicator)
-                    )
-                elif isinstance(event, TextDelta):
-                    reply_buffer.append(event.text)
-                    live.update(
-                        _stream_renderable(thinking_text, "".join(reply_buffer), indicator)
-                    )
-                elif isinstance(event, Done):
-                    thinking_raw = event.thinking_raw
+            try:
+                for event in provider.stream(session.messages):
+                    if isinstance(event, ThinkingDelta):
+                        thinking_text += event.text
+                        live.update(
+                            _stream_renderable(thinking_text, "".join(reply_buffer), indicator)
+                        )
+                    elif isinstance(event, TextDelta):
+                        reply_buffer.append(event.text)
+                        live.update(
+                            _stream_renderable(thinking_text, "".join(reply_buffer), indicator)
+                        )
+                    elif isinstance(event, Done):
+                        thinking_raw = event.thinking_raw
+            except (ProviderError, KeyboardInterrupt):
+                # 清空 Live 区域：错误/中断面板上方不残留计时行或半截正文
+                live.update(Text(""), refresh=True)
+                raise
         session.add_assistant(
             text="".join(reply_buffer),
             thinking=thinking_text,

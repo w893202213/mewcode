@@ -2,7 +2,7 @@
 
 from rich.console import Console
 
-from mewcode.provider.base import Done, TextDelta
+from mewcode.provider.base import Done, ProviderError, TextDelta
 from mewcode.session import ChatSession
 from mewcode.tui.app import ThinkingIndicator, _chat_round, _stream_renderable
 from mewcode.tui.double_press import DoublePressTracker
@@ -88,3 +88,23 @@ def test_chat_round_no_user_echo():
     # 会话记录不受显示层影响
     assert session.messages[0].text == "我的问题"
     assert session.messages[1].text == "你好"
+
+
+class ErrorProvider:
+    """流中途抛错的假 Provider：用于验证错误面板上方无计时残留。"""
+
+    def stream(self, messages):
+        raise ProviderError("服务端返回错误: mock 服务过载")
+
+
+def test_chat_round_error_no_timer_leftover():
+    """错误路径：显示请求失败面板，计时行不残留。"""
+    console = Console(record=True, force_terminal=False)
+    session = ChatSession()
+    _chat_round(console, ErrorProvider(), session, "测试错误", DoublePressTracker())
+    out = console.export_text()
+    assert "请求失败" in out
+    assert "服务端返回错误: mock 服务过载" in out
+    assert "thinking…" not in out
+    # 本轮 user 消息回滚，不留在上下文
+    assert session.messages == []
