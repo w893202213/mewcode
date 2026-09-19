@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
+
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import NestedCompleter
 from prompt_toolkit.key_binding import KeyBindings
@@ -31,9 +34,9 @@ from mewcode.tui.commands import CommandResult, COMMAND_NAMES, handle_command
 from mewcode.tui.double_press import DoublePressTracker, ExitSignal
 
 # 渲染样式常量
-_USER_PREFIX = "[bold cyan]▸ 你[/bold cyan]"
 _ASSISTANT_PREFIX = "[bold magenta]🐱 MewCode[/bold magenta]"
-_THINKING_HEADER = "💭 思考中…"
+# 计时行样式（用户要求灰色，区别于正文）
+_TIMER_STYLE = "grey50"
 # Ctrl+C 双击退出提示（显示在输入行下方 bottom_toolbar）
 _EXIT_HINT = "再按一次 Ctrl+C 退出"
 
@@ -111,8 +114,10 @@ def _chat_round(
     text: str,
     tracker: DoublePressTracker,
 ) -> None:
-    """一轮对话：打印用户消息 → 流式渲染回复 → 落盘会话；失败或中断回滚并提示。"""
-    console.print(f"{_USER_PREFIX} {text}")
+    """一轮对话：流式渲染回复 → 落盘会话；失败或中断回滚并提示。
+
+    用户消息不回显：prompt_toolkit 输入行已留在终端滚动区，问题天然可见。
+    """
     start_index = len(session.messages)  # 记录起点，失败时回滚
     session.add_user(text)
 
@@ -123,17 +128,23 @@ def _chat_round(
     try:
         # 助手回复前缀独立成行，流式内容渲染在它下方
         console.print(_ASSISTANT_PREFIX)
-        # Live 区域：思考区（灰色）+ 流式 Markdown；输入行由 patch_stdout 保持在底部
+        # 计时起点：请求即将发出；静默期由 Live 的 auto_refresh 驱动秒数跳动
+        indicator = ThinkingIndicator()
+        # Live 区域：思考期灰色计时（+思考文本）+ 流式 Markdown；输入行由 patch_stdout 保持在底部
         with Live(
-            Markdown(""), console=console, refresh_per_second=10, vertical_overflow="visible"
+            indicator, console=console, refresh_per_second=10, vertical_overflow="visible"
         ) as live:
             for event in provider.stream(session.messages):
                 if isinstance(event, ThinkingDelta):
                     thinking_text += event.text
-                    live.update(_thinking_renderable(thinking_text, "".join(reply_buffer)))
+                    live.update(
+                        _stream_renderable(thinking_text, "".join(reply_buffer), indicator)
+                    )
                 elif isinstance(event, TextDelta):
                     reply_buffer.append(event.text)
-                    live.update(_thinking_renderable(thinking_text, "".join(reply_buffer)))
+                    live.update(
+                        _stream_renderable(thinking_text, "".join(reply_buffer), indicator)
+                    )
                 elif isinstance(event, Done):
                     thinking_raw = event.thinking_raw
         session.add_assistant(
@@ -158,11 +169,29 @@ def _chat_round(
         )
 
 
-def _thinking_renderable(thinking: str, reply: str) -> Group:
-    """组装 Live 渲染内容：思考区（灰色）在上、Markdown 回复在下。"""
+class ThinkingIndicator:
+    """时间感知渲染对象：每次渲染时用单调时钟计算已思考秒数。
+
+    rich Live 的 auto_refresh 线程会周期性重渲染当前 renderable，
+    因此本对象无需额外线程即可让秒数自动跳动；clock 可注入便于测试。
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._start = clock()
+
+    def __rich_console__(self, console, options):
+        """渲染灰色 thinking… Ns 计时行（N 为经过的整秒数）。"""
+        elapsed = int(self._clock() - self._start)
+        yield Text(f"thinking… {elapsed}s", style=_TIMER_STYLE)
+
+
+def _stream_renderable(
+    thinking: str, reply: str, indicator: ThinkingIndicator
+) -> Group:
+    """组装 Live 渲染内容：思考期显示灰色计时行（有思考内容时并在下方），回复开始后只显示正文。"""
+    if reply:
+        return Group(Markdown(reply))
     if thinking:
-        return Group(
-            Text(f"{_THINKING_HEADER}\n{thinking}", style="dim"),
-            Markdown(reply),
-        )
-    return Group(Markdown(reply))
+        return Group(indicator, Text(thinking, style="dim"))
+    return Group(indicator)
