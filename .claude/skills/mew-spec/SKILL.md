@@ -13,6 +13,19 @@ spec.md（做什么）→ plan.md（怎么做）→ task.md（按什么顺序做
 
 每份文档在前一份基础上细化。每份都需要用户审批后才能进入下一阶段。
 
+## 文档组织（章节目录）
+
+每个迭代/功能的四份文档放在独立章节目录里，按两位序号递增：
+
+```
+docs/ch01/spec.md      docs/ch01/plan.md      docs/ch01/task.md      docs/ch01/checklist.md
+docs/ch02/spec.md      docs/ch02/plan.md      ...
+```
+
+- 首次开发从 `docs/ch01/` 开始；之后的每个新功能、模块、章节依次占用 `ch02/`、`ch03/`……
+- 序号不可复用：即使某个章节废弃，下一个章节仍用新序号
+- 四份文档的文件名固定为 spec.md / plan.md / task.md / checklist.md，不再直接写到 docs/ 顶层
+
 <HARD-GATE>
 四份文档全部生成并获得用户批准之前，禁止编写任何实现代码。无论项目看起来多简单，一律走完流程。
 </HARD-GATE>
