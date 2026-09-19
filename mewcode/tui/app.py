@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import NestedCompleter
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console, Group
 from rich.live import Live
@@ -27,11 +28,14 @@ from mewcode.provider.base import (
 )
 from mewcode.session import ChatSession
 from mewcode.tui.commands import CommandResult, COMMAND_NAMES, handle_command
+from mewcode.tui.double_press import DoublePressTracker, ExitSignal
 
 # 渲染样式常量
 _USER_PREFIX = "[bold cyan]▸ 你[/bold cyan]"
 _ASSISTANT_PREFIX = "[bold magenta]🐱 MewCode[/bold magenta]"
 _THINKING_HEADER = "💭 思考中…"
+# Ctrl+C 双击退出提示（显示在输入行下方 bottom_toolbar）
+_EXIT_HINT = "再按一次 Ctrl+C 退出"
 
 
 def _print_welcome(console: Console, config: ProviderConfig) -> None:
@@ -50,10 +54,28 @@ def _print_welcome(console: Console, config: ProviderConfig) -> None:
 def run(provider: Provider, config: ProviderConfig) -> None:
     """TUI 主循环：读输入 → 命令或对话 → 回到输入。"""
     session = ChatSession()
+
+    # 双击 Ctrl+C 判定：第一次提示（不清行），3 秒内第二次退出
+    tracker = DoublePressTracker()
+    kb = KeyBindings()
+
+    @kb.add("c-c")
+    def _(event):
+        """Ctrl+C：覆盖默认 abort（KeyboardInterrupt），改为双击退出。"""
+        if tracker.press():
+            event.app.exit(result=ExitSignal.EXIT)
+        else:
+            event.app.invalidate()  # 立即重绘，让提示出现
+
     # 默认 InMemoryHistory：上下键回溯本次会话输入
+    # bottom_toolbar：仅在提示窗口内显示「再按一次 Ctrl+C 退出」（返回 None 时隐藏）
+    # refresh_interval：0.5s 重绘一次，提示 3 秒后自动过期消失
     prompt_session = PromptSession(
         message=[("class:prompt", "❯ ")],
         completer=NestedCompleter.from_nested_dict({cmd: None for cmd in COMMAND_NAMES}),
+        key_bindings=kb,
+        bottom_toolbar=lambda: _EXIT_HINT if tracker.hint_active() else None,
+        refresh_interval=0.5,
     )
 
     # patch_stdout(raw=True)：Rich 输出与 prompt_toolkit 输入行共存
@@ -64,10 +86,12 @@ def run(provider: Provider, config: ProviderConfig) -> None:
             try:
                 text = prompt_session.prompt()
             except KeyboardInterrupt:
-                continue  # Ctrl+C：放弃当前输入行，继续
+                continue  # 非按键来源的 SIGINT 安全网；按键 Ctrl+C 已被自定义绑定接管
             except EOFError:
                 console.print("再见！👋")
                 return
+            if text is ExitSignal.EXIT:
+                return  # 双击 Ctrl+C：正常退出，回到 CLI
             text = text.strip()
             if not text:
                 continue
@@ -77,11 +101,17 @@ def run(provider: Provider, config: ProviderConfig) -> None:
                 if result is CommandResult.EXIT:
                     return
                 continue
-            _chat_round(console, provider, session, text)
+            _chat_round(console, provider, session, text, tracker)
 
 
-def _chat_round(console: Console, provider: Provider, session: ChatSession, text: str) -> None:
-    """一轮对话：打印用户消息 → 流式渲染回复 → 落盘会话；失败回滚并显示错误。"""
+def _chat_round(
+    console: Console,
+    provider: Provider,
+    session: ChatSession,
+    text: str,
+    tracker: DoublePressTracker,
+) -> None:
+    """一轮对话：打印用户消息 → 流式渲染回复 → 落盘会话；失败或中断回滚并提示。"""
     console.print(f"{_USER_PREFIX} {text}")
     start_index = len(session.messages)  # 记录起点，失败时回滚
     session.add_user(text)
@@ -115,6 +145,17 @@ def _chat_round(console: Console, provider: Provider, session: ChatSession, text
         # 回滚本轮 user 消息：未被处理的输入不留在上下文里
         del session.messages[start_index:]
         console.print(Panel(str(e), title="[bold red]请求失败[/bold red]", border_style="red"))
+    except KeyboardInterrupt:
+        # 流式中断（Ctrl+C）：回滚未完成的轮次，回到输入行；双击计数从头开始
+        del session.messages[start_index:]
+        tracker.reset()
+        console.print(
+            Panel(
+                "已中断，本轮回复未保存。",
+                title="[bold yellow]回复中断[/bold yellow]",
+                border_style="yellow",
+            )
+        )
 
 
 def _thinking_renderable(thinking: str, reply: str) -> Group:
