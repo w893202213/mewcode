@@ -1,0 +1,26 @@
+# MewCode 配置文件示例
+# 复制为 ~/.mewcode/config.yaml 并填入你自己的密钥；
+# 或放到任意位置后用 --config 指定路径。
+#
+# 每份配置包含 6 个字段：
+#   name     供应商标识名（--profile 用它选择）
+#   protocol 协议: anthropic | openai
+#   model    模型名
+#   base_url 请求地址（API 基础地址）
+#   api_key  认证密钥
+#   thinking 是否启用扩展思考（可选，缺省 false）
+
+providers:
+  - name: claude
+    protocol: anthropic
+    model: claude-sonnet-4-5
+    base_url: https://api.anthropic.com
+    api_key: sk-ant-xxxx      # 到 console.anthropic.com 获取
+    thinking: true            # 启用 extended thinking
+
+  - name: gpt
+    protocol: openai
+    model: gpt-4o
+    base_url: https://api.openai.com
+    api_key: sk-xxxx          # 到 platform.openai.com 获取
+    # thinking: true          # 可选：透传给支持 thinking 的 OpenAI 兼容服务
