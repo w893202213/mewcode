@@ -13,6 +13,7 @@
 """
 
 import json
+import os
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -51,6 +52,9 @@ OPENAI_CHUNKS = [
 
 
 class MockHandler(BaseHTTPRequestHandler):
+    # 流事件发送间隔（秒），可由 MOCK_DELAY 环境变量调整，默认 0.05
+    delay: float = 0.05
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length))
@@ -63,21 +67,24 @@ class MockHandler(BaseHTTPRequestHandler):
             elif model == "unauthorized-model":
                 self._send_json(401, {"error": {"message": "mock invalid api key"}})
             elif "thinking" in body:
-                self._send_sse(ANTHROPIC_EVENTS, delay=0.05)
+                self._send_sse(ANTHROPIC_EVENTS)
             else:
                 # 请求未启用 thinking：只返回文本块（真实 API 行为一致）
-                self._send_sse(ANTHROPIC_TEXT_ONLY_EVENTS, delay=0.05)
+                self._send_sse(ANTHROPIC_TEXT_ONLY_EVENTS)
         elif self.path.endswith("/v1/chat/completions"):
             if model == "error-model":
                 self._send_sse(['{"error":{"message":"mock 服务出错"}}'])
             elif model == "unauthorized-model":
                 self._send_json(401, {"error": {"message": "mock invalid api key"}})
             else:
-                self._send_sse(OPENAI_CHUNKS, delay=0.05)
+                self._send_sse(OPENAI_CHUNKS)
         else:
             self._send_json(404, {"error": {"message": "not found"}})
 
-    def _send_sse(self, events: list[str], delay: float = 0.0):
+    def _send_sse(self, events: list[str], delay: float | None = None):
+        # delay 未指定时使用类属性（可经 MOCK_DELAY 环境变量调整）
+        if delay is None:
+            delay = self.delay
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -101,6 +108,8 @@ class MockHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8989
+    # 测试辅助：MOCK_DELAY 环境变量调整流事件间隔（默认 0.05 不变）
+    MockHandler.delay = float(os.environ.get("MOCK_DELAY", "0.05"))
     server = HTTPServer(("127.0.0.1", port), MockHandler)
     print(f"mock LLM 服务已启动: http://127.0.0.1:{port}（请求记录写入 mock_requests.log）", flush=True)
     server.serve_forever()
