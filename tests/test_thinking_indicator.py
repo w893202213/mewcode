@@ -3,7 +3,7 @@
 from rich.console import Console
 
 from mewcode.agent import ToolRunner
-from mewcode.provider.base import Done, ProviderError, TextDelta
+from mewcode.provider.base import Done, ProviderError, TextDelta, ToolCall
 from mewcode.session import ChatSession
 from mewcode.tools import create_registry
 from mewcode.tui.app import ThinkingIndicator, _chat_round, _stream_renderable
@@ -94,6 +94,44 @@ def test_chat_round_no_user_echo():
     # 会话记录不受显示层影响
     assert session.messages[0].text == "我的问题"
     assert session.messages[1].text == "你好"
+
+
+class TwoToolsProvider:
+    """单响应含两个工具调用的假 Provider：验证 F8 只执行第一个。"""
+
+    def stream(self, messages, tools=None):
+        yield ToolCall(id="toolu_1", name="read_file", args={"file_path": "目标.py"})
+        yield ToolCall(id="toolu_2", name="grep_code", args={"pattern": "x"})
+        yield Done()
+
+
+def test_chat_round_only_first_tool_call_executed(tmp_path):
+    """多工具调用：只执行第一个，其余提示忽略；会话只记录第一个（F8）。"""
+    target = tmp_path / "目标.py"
+    target.write_text("x = 1\n", encoding="utf-8")
+    console = Console(record=True, force_terminal=False)
+    session = ChatSession()
+    registry = create_registry()
+    runner = ToolRunner(registry, session)
+    _chat_round(
+        console,
+        TwoToolsProvider(),
+        session,
+        registry,
+        runner,
+        "帮我改",
+        DoublePressTracker(),
+    )
+    out = console.export_text()
+    assert "read_file" in out
+    assert "忽略" in out  # 第二个工具调用被提示忽略
+    assert "grep_code" not in out  # 第二个工具未执行也未展示
+    # 会话记录：assistant 只带第一个 tool_use，结果回灌一条
+    assistant = session.messages[1]
+    assert [u.name for u in assistant.tool_uses] == ["read_file"]
+    results = session.messages[2].tool_results
+    assert len(results) == 1
+    assert results[0].tool_use_id == "toolu_1"
 
 
 class ErrorProvider:
