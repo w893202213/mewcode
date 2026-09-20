@@ -1,13 +1,15 @@
-"""TUI 主循环：输入、流式渲染、错误显示。
+"""TUI 主循环：输入、Agent 事件消费渲染、错误显示。
 
 组合方式：prompt_toolkit PromptSession 管输入（历史/补全），Rich 管输出
-（Markdown 渲染、Live 流式刷新、思考块灰色展示）。patch_stdout 让两者共存，
-输入行始终停在最底部。
+（Markdown 渲染、Live 流式刷新、思考块灰色展示）。Agent 在后台线程跑
+事件循环（run_in_background），事件经线程安全队列交给主线程渲染；
+patch_stdout 让 Rich 与输入行共存，输入行始终停在最底部。
 """
 
 from __future__ import annotations
 
 import json
+import queue
 import time
 from collections.abc import Callable
 
@@ -22,17 +24,20 @@ from rich.panel import Panel
 from rich.text import Text
 
 from mewcode import __version__
-from mewcode.agent import execute_call
-from mewcode.config import ProviderConfig
-from mewcode.provider.base import (
-    Done,
-    Provider,
-    ProviderError,
-    TextDelta,
+from mewcode.agent import Agent, run_in_background
+from mewcode.agent.events import (
+    ProgressEvent,
+    RoundEnd,
+    RoundEndReason,
     ThinkingDelta,
-    ToolCall,
+    TextDelta,
+    ToolCallStarted,
+    ToolResultEvent,
+    UsageEvent,
 )
-from mewcode.session import ChatSession, ToolResultRecord, ToolUse
+from mewcode.config import ProviderConfig
+from mewcode.provider.base import Provider
+from mewcode.session import ChatSession
 from mewcode.tools import ToolRegistry
 from mewcode.tui.commands import CommandResult, COMMAND_NAMES, handle_command
 from mewcode.tui.double_press import DoublePressTracker, ExitSignal
@@ -46,6 +51,8 @@ _EXIT_HINT = "再按一次 Ctrl+C 退出"
 # 工具调用展示截断：参数摘要 200 字符、结果面板 2000 字符（显示截断，回灌内容不受影响）
 _ARGS_SUMMARY_CHARS = 200
 _DISPLAY_RESULT_CHARS = 2000
+# 取消后等待 RoundEnd 的最大秒数（防御：后台异常时界面不悬挂）
+_CANCEL_DRAIN_TIMEOUT = 5.0
 
 
 def _print_welcome(console: Console, config: ProviderConfig) -> None:
@@ -62,8 +69,9 @@ def _print_welcome(console: Console, config: ProviderConfig) -> None:
 
 
 def run(provider: Provider, config: ProviderConfig, registry: ToolRegistry) -> None:
-    """TUI 主循环：读输入 → 命令或对话 → 回到输入。"""
+    """TUI 主循环：读输入 → 命令或 Agent Loop → 回到输入。"""
     session = ChatSession()
+    agent = Agent(provider, registry, session)
 
     # 双击 Ctrl+C 判定：第一次提示（不清行），3 秒内第二次退出
     tracker = DoublePressTracker()
@@ -107,127 +115,173 @@ def run(provider: Provider, config: ProviderConfig, registry: ToolRegistry) -> N
             if not text:
                 continue
             if text.startswith("/"):
-                result, feedback = handle_command(text, session)
+                result, feedback = handle_command(text, session, agent)
                 console.print(feedback)
                 if result is CommandResult.EXIT:
                     return
                 continue
-            _chat_round(console, provider, session, registry, text, tracker)
+            _agent_round(console, agent, text, tracker)
 
 
-def _chat_round(
-    console: Console,
-    provider: Provider,
-    session: ChatSession,
-    registry: ToolRegistry,
-    text: str,
-    tracker: DoublePressTracker,
-) -> None:
-    """一轮对话：流式渲染回复 → 落盘会话；失败或中断回滚并提示。
+def _agent_round(console: Console, agent: Agent, text: str, tracker: DoublePressTracker) -> None:
+    """一轮 Agent Loop：后台跑 Agent，主线程消费事件渲染（F9）。
 
     用户消息不回显：prompt_toolkit 输入行已留在终端滚动区，问题天然可见。
+    Ctrl+C 取消循环（已完成步骤保留）；取消后继续排空队列直到 RoundEnd。
     """
-    start_index = len(session.messages)  # 记录起点，失败时回滚
-    session.add_user(text)
+    q = run_in_background(agent, text)
+    # 助手回复前缀独立成行，事件流内容渲染在它下方
+    console.print(_ASSISTANT_PREFIX)
+    usage: dict[str, int] = {"in": 0, "out": 0}
+    end: RoundEnd | None = None
+    try:
+        end = _consume_events(console, q, usage)
+    except KeyboardInterrupt:
+        agent.cancel()
+        tracker.reset()  # 双击退出计数从头开始
+        try:
+            end = _drain_cancelled(console, q, usage)
+        except KeyboardInterrupt:
+            end = None  # 用户再按 Ctrl+C：不再等待后台收尾
+    if end is None:
+        end = RoundEnd(RoundEndReason.CANCELLED, "已取消")
+    _print_end(console, usage["in"], usage["out"], end)
 
-    reply_buffer: list[str] = []
-    thinking_text = ""
-    thinking_raw: list[dict] = []
-    # 工具调用：本步每轮只执行第一个，其余计数提示忽略（F8）
-    first_call: ToolCall | None = None
-    ignored_calls = 0
+
+def _consume_events(console: Console, q: queue.Queue, usage: dict[str, int]) -> RoundEnd:
+    """消费事件队列直到 RoundEnd；返回结束事件。
+
+    每轮一个 Live（流式文本 + 第 N 轮进度 + 思考计时），工具调用与
+    结果在流结束后逐条打印（ch04 样式）。KeyboardInterrupt 向上传播
+    给 _agent_round 处理取消；finally 保证 Live 一定关闭。
+    """
+    live: Live | None = None
+    indicator: ThinkingIndicator | None = None
+    iteration = 0
+    thinking = ""
+    reply: list[str] = []
+
+    def render() -> None:
+        if live is not None:
+            live.update(
+                _stream_renderable(iteration, thinking, "".join(reply), indicator)
+            )
+
+    def close_live() -> None:
+        nonlocal live
+        if live is not None:
+            live.stop()
+            live = None
 
     try:
-        # 助手回复前缀独立成行，流式内容渲染在它下方
-        console.print(_ASSISTANT_PREFIX)
-        # 计时起点：请求即将发出；静默期由 Live 的 auto_refresh 驱动秒数跳动
-        indicator = ThinkingIndicator()
-        # Live 区域：思考期灰色计时（+思考文本）+ 流式 Markdown；输入行由 patch_stdout 保持在底部
-        with Live(
-            indicator, console=console, refresh_per_second=10, vertical_overflow="visible"
-        ) as live:
+        while True:
             try:
-                for event in provider.stream(session.messages, registry.list()):
-                    if isinstance(event, ThinkingDelta):
-                        thinking_text += event.text
-                        live.update(
-                            _stream_renderable(thinking_text, "".join(reply_buffer), indicator)
-                        )
-                    elif isinstance(event, TextDelta):
-                        reply_buffer.append(event.text)
-                        live.update(
-                            _stream_renderable(thinking_text, "".join(reply_buffer), indicator)
-                        )
-                    elif isinstance(event, ToolCall):
-                        if first_call is None:
-                            first_call = event
-                        else:
-                            ignored_calls += 1
-                    elif isinstance(event, Done):
-                        thinking_raw = event.thinking_raw
-            except (ProviderError, KeyboardInterrupt):
-                # 清空 Live 区域：错误/中断面板上方不残留计时行或半截正文
-                live.update(Text(""), refresh=True)
-                raise
-        if first_call is not None:
-            # 工具轮次：记录 assistant 消息（含工具调用），执行并展示结果
-            session.add_assistant(
-                text="".join(reply_buffer),
-                thinking=thinking_text,
-                thinking_raw=thinking_raw,
-                tool_uses=[ToolUse(id=first_call.id, name=first_call.name, args=first_call.args)],
-            )
-            _run_tool_round(console, registry, session, first_call, ignored_calls)
-        else:
-            session.add_assistant(
-                text="".join(reply_buffer),
-                thinking=thinking_text,
-                thinking_raw=thinking_raw,
-            )
-    except ProviderError as e:
-        # 回滚本轮 user 消息：未被处理的输入不留在上下文里
-        del session.messages[start_index:]
-        console.print(Panel(str(e), title="[bold red]请求失败[/bold red]", border_style="red"))
-    except KeyboardInterrupt:
-        # 流式中断（Ctrl+C）：回滚未完成的轮次，回到输入行；双击计数从头开始
-        del session.messages[start_index:]
-        tracker.reset()
+                event = q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if isinstance(event, ProgressEvent):
+                # 新一轮：关闭上一轮 Live（工具面板已打印），开新 Live
+                close_live()
+                iteration = event.iteration
+                thinking = ""
+                reply.clear()
+                indicator = ThinkingIndicator()
+                live = Live(
+                    indicator,
+                    console=console,
+                    refresh_per_second=10,
+                    vertical_overflow="visible",
+                )
+                live.start()
+                render()
+            elif isinstance(event, ThinkingDelta):
+                thinking += event.text
+                render()
+            elif isinstance(event, TextDelta):
+                reply.append(event.text)
+                render()
+            elif isinstance(event, ToolCallStarted):
+                close_live()
+                _print_tool_call(console, event.call)
+            elif isinstance(event, ToolResultEvent):
+                _print_tool_result(console, event.result)
+            elif isinstance(event, UsageEvent):
+                usage["in"] = event.input_tokens
+                usage["out"] = event.output_tokens
+            elif isinstance(event, RoundEnd):
+                if live is not None:
+                    if event.reason is RoundEndReason.ERROR:
+                        # 清空半截正文：错误面板上方不残留流式内容
+                        live.update(Text(""), refresh=True)
+                    live.stop()
+                    live = None
+                return event
+    finally:
+        close_live()
+
+
+def _drain_cancelled(console: Console, q: queue.Queue, usage: dict[str, int]) -> RoundEnd | None:
+    """取消后继续消费队列直到 RoundEnd（渲染途中到达的工具面板），超时放弃。"""
+    deadline = time.monotonic() + _CANCEL_DRAIN_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            event = q.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        if isinstance(event, ToolCallStarted):
+            _print_tool_call(console, event.call)
+        elif isinstance(event, ToolResultEvent):
+            _print_tool_result(console, event.result)
+        elif isinstance(event, UsageEvent):
+            usage["in"] = event.input_tokens
+            usage["out"] = event.output_tokens
+        elif isinstance(event, RoundEnd):
+            return event
+    return None
+
+
+def _print_end(console: Console, usage_in: int, usage_out: int, end: RoundEnd) -> None:
+    """轮次收尾：token 用量行 + 停止原因面板。"""
+    if usage_in or usage_out:
+        console.print(
+            Text(f"本轮 token: 输入 {usage_in} · 输出 {usage_out}", style=_TIMER_STYLE)
+        )
+    if end.reason is RoundEndReason.ERROR:
+        console.print(
+            Panel(end.message or "请求失败", title="[bold red]请求失败[/bold red]", border_style="red")
+        )
+    elif end.reason is RoundEndReason.CANCELLED:
         console.print(
             Panel(
-                "已中断，本轮回复未保存。",
-                title="[bold yellow]回复中断[/bold yellow]",
+                "已取消（已完成步骤保留）。",
+                title="[bold yellow]已取消[/bold yellow]",
+                border_style="yellow",
+            )
+        )
+    elif end.reason is RoundEndReason.LIMIT:
+        console.print(
+            Panel(end.message, title="[bold yellow]已达迭代上限[/bold yellow]", border_style="yellow")
+        )
+    elif end.reason is RoundEndReason.UNKNOWN_TOOL:
+        console.print(
+            Panel(
+                "连续调用未知工具，已停止。",
+                title="[bold yellow]已停止[/bold yellow]",
                 border_style="yellow",
             )
         )
 
 
-def _run_tool_round(
-    console: Console,
-    registry: ToolRegistry,
-    session: ChatSession,
-    call: ToolCall,
-    ignored_calls: int,
-) -> None:
-    """展示工具调用 → 执行 → 结果回灌 + 展示。
-
-    结果面板按显示上限截断；回灌会话的内容由 run_tool 按 30000 字符上限截断，
-    两者互不影响。
-    """
+def _print_tool_call(console: Console, call) -> None:
+    """展示工具调用：工具名 + 参数摘要（F9）。"""
     args_summary = json.dumps(call.args, ensure_ascii=False)
     if len(args_summary) > _ARGS_SUMMARY_CHARS:
         args_summary = args_summary[: _ARGS_SUMMARY_CHARS] + "…"
     console.print(Text(f"🔧 {call.name} {args_summary}", style="dim"))
-    if ignored_calls:
-        console.print(
-            Text(f"另有 {ignored_calls} 个工具调用本步忽略（每轮只执行一个工具）", style="dim")
-        )
 
-    result = execute_call(registry, call)
-    session.add_tool_result(
-        ToolResultRecord(
-            tool_use_id=call.id, content=result.content, is_error=not result.ok
-        )
-    )
+
+def _print_tool_result(console: Console, result) -> None:
+    """展示工具结果面板（成功绿/失败红，按显示上限截断）。"""
     display = result.content
     if len(display) > _DISPLAY_RESULT_CHARS:
         display = display[: _DISPLAY_RESULT_CHARS] + f"\n…（终端显示截断，共 {len(result.content)} 字符）"
@@ -259,11 +313,16 @@ class ThinkingIndicator:
 
 
 def _stream_renderable(
-    thinking: str, reply: str, indicator: ThinkingIndicator
+    thinking: str, reply: str, indicator: ThinkingIndicator, iteration: int = 0
 ) -> Group:
-    """组装 Live 渲染内容：思考期显示灰色计时行（有思考内容时并在下方），回复开始后只显示正文。"""
+    """组装 Live 渲染内容：第 N 轮 → 思考期灰色计时（有思考内容时并在下方）→ 流式正文。"""
+    parts: list = []
+    if iteration:
+        parts.append(Text(f"第 {iteration} 轮", style=_TIMER_STYLE))
     if reply:
-        return Group(Markdown(reply))
-    if thinking:
-        return Group(indicator, Text(thinking, style="dim"))
-    return Group(indicator)
+        parts.append(Markdown(reply))
+    else:
+        parts.append(indicator)
+        if thinking:
+            parts.append(Text(thinking, style="dim"))
+    return Group(*parts)

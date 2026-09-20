@@ -8,6 +8,11 @@
 - POST /v1/chat/completions  → OpenAI 流（逐 chunk）
 - model 名为 "error-model"   → 流中途 error 事件
 - model 名为 "unauthorized-model" → HTTP 401
+- ch05 Agent Loop 多轮流：
+  - "loop-model"        → 按请求体中已回灌的工具结果数分轮（读文件→跑命令→最终文本）
+  - "multi-tool-model"  → 单轮三个工具调用（read_file + grep_code + run_command）
+  - "unknown-tool-model"→ 每轮调用不存在的 no_such_tool（触发连续未知工具停止）
+  - "never-stop-model"  → 每轮调用 read_file（触发迭代上限）
 
 收到的请求体会以 JSON 行追加写入 ./mock_requests.log，供检查 thinking 透传等字段。
 """
@@ -111,6 +116,327 @@ OPENAI_CHUNKS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# ch05: Agent Loop 多轮流构造（事件行用 dict + json.dumps 拼装，避免括号出错）
+# ---------------------------------------------------------------------------
+
+
+def _anthropic_tool_result_count(body: dict) -> int:
+    """统计请求体中已回灌的工具结果数（分轮依据）。"""
+    count = 0
+    for m in body.get("messages", []):
+        content = m.get("content")
+        if isinstance(content, list):
+            count += sum(
+                1 for b in content if isinstance(b, dict) and b.get("type") == "tool_result"
+            )
+    return count
+
+
+def _openai_tool_result_count(body: dict) -> int:
+    return sum(1 for m in body.get("messages", []) if m.get("role") == "tool")
+
+
+def _anthropic_tool_round(
+    tool_use_id: str, name: str, args: dict, text: str | None = None
+) -> list[str]:
+    """一轮 Anthropic 事件：可选文本块 + 一个完整参数的 tool_use 块 + usage。"""
+    events = []
+    index = 0
+    if text:
+        events.append(
+            json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+        )
+        events.append(
+            json.dumps(
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}},
+                ensure_ascii=False,
+            )
+        )
+        events.append(json.dumps({"type": "content_block_stop", "index": 0}))
+        index = 1
+    events.append(
+        json.dumps(
+            {
+                "type": "content_block_start",
+                "index": index,
+                "content_block": {"type": "tool_use", "id": tool_use_id, "name": name, "input": {}},
+            }
+        )
+    )
+    events.append(
+        json.dumps(
+            {
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {"type": "input_json_delta", "partial_json": json.dumps(args, ensure_ascii=False)},
+            },
+            ensure_ascii=False,
+        )
+    )
+    events.append(json.dumps({"type": "content_block_stop", "index": index}))
+    events.append(
+        json.dumps(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"input_tokens": 100, "output_tokens": 42},
+            }
+        )
+    )
+    events.append(json.dumps({"type": "message_stop"}))
+    return events
+
+
+def _anthropic_text_round(text: str) -> list[str]:
+    """一轮 Anthropic 纯文本事件（最终回复轮）。"""
+    return [
+        json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+        json.dumps(
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}},
+            ensure_ascii=False,
+        ),
+        json.dumps({"type": "content_block_stop", "index": 0}),
+        json.dumps(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"input_tokens": 100, "output_tokens": 42},
+            }
+        ),
+        json.dumps({"type": "message_stop"}),
+    ]
+
+
+def _anthropic_multi_tool_events() -> list[str]:
+    """单轮三个 tool_use 块（read_file + grep_code + run_command）。"""
+    calls = [
+        ("toolu_m1", "read_file", {"file_path": "pyproject.toml"}),
+        ("toolu_m2", "grep_code", {"pattern": "version"}),
+        ("toolu_m3", "run_command", {"command": "echo batch ok"}),
+    ]
+    events = []
+    for index, (tid, name, args) in enumerate(calls):
+        events.append(
+            json.dumps(
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {"type": "tool_use", "id": tid, "name": name, "input": {}},
+                }
+            )
+        )
+        events.append(
+            json.dumps(
+                {
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {"type": "input_json_delta", "partial_json": json.dumps(args, ensure_ascii=False)},
+                },
+                ensure_ascii=False,
+            )
+        )
+        events.append(json.dumps({"type": "content_block_stop", "index": index}))
+    events.append(
+        json.dumps(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"input_tokens": 100, "output_tokens": 42},
+            }
+        )
+    )
+    events.append(json.dumps({"type": "message_stop"}))
+    return events
+
+
+def _openai_tool_round_chunks(
+    tool_call_id: str, name: str, args: dict, text: str | None = None
+) -> list[str]:
+    """一轮 OpenAI 工具调用 chunk（参数一片到位，finish chunk 附 usage）。"""
+    chunks = [
+        json.dumps(
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": None}, "finish_reason": None}],
+            }
+        )
+    ]
+    if text:
+        chunks.append(
+            json.dumps(
+                {
+                    "id": "c1",
+                    "object": "chat.completion.chunk",
+                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                },
+                ensure_ascii=False,
+            )
+        )
+    chunks.append(
+        json.dumps(
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": tool_call_id,
+                                    "type": "function",
+                                    "function": {"name": name, "arguments": ""},
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            }
+        )
+    )
+    chunks.append(
+        json.dumps(
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "function": {"arguments": json.dumps(args, ensure_ascii=False)}}
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+    )
+    chunks.append(
+        json.dumps(
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 42},
+            }
+        )
+    )
+    chunks.append("data: [DONE]")
+    return chunks
+
+
+def _openai_text_round_chunks(text: str) -> list[str]:
+    """一轮 OpenAI 纯文本 chunk（最终回复轮，finish chunk 附 usage）。"""
+    return [
+        json.dumps(
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+            }
+        ),
+        json.dumps(
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+            },
+            ensure_ascii=False,
+        ),
+        json.dumps(
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 42},
+            }
+        ),
+        "data: [DONE]",
+    ]
+
+
+def _openai_multi_tool_chunks() -> list[str]:
+    """单轮三个 tool_calls（read_file + grep_code + run_command，带 index）。"""
+    calls = [
+        ("call_m1", "read_file", {"file_path": "pyproject.toml"}),
+        ("call_m2", "grep_code", {"pattern": "version"}),
+        ("call_m3", "run_command", {"command": "echo batch ok"}),
+    ]
+    chunks = [
+        json.dumps(
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": None}, "finish_reason": None}],
+            }
+        )
+    ]
+    for index, (cid, name, args) in enumerate(calls):
+        chunks.append(
+            json.dumps(
+                {
+                    "id": "c1",
+                    "object": "chat.completion.chunk",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": index,
+                                        "id": cid,
+                                        "type": "function",
+                                        "function": {"name": name, "arguments": ""},
+                                    }
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            )
+        )
+        chunks.append(
+            json.dumps(
+                {
+                    "id": "c1",
+                    "object": "chat.completion.chunk",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {"index": index, "function": {"arguments": json.dumps(args, ensure_ascii=False)}}
+                                ]
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+    chunks.append(
+        json.dumps(
+            {
+                "id": "c1",
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 42},
+            }
+        )
+    )
+    chunks.append("data: [DONE]")
+    return chunks
+
+
 class MockHandler(BaseHTTPRequestHandler):
     # 流事件发送间隔（秒），可由 MOCK_DELAY 环境变量调整，默认 0.05
     delay: float = 0.05
@@ -133,6 +459,31 @@ class MockHandler(BaseHTTPRequestHandler):
                 self._send_sse(ANTHROPIC_CMD_EVENTS)
             elif has_tools and model == "tool-badjson-model":
                 self._send_sse(ANTHROPIC_BADJSON_EVENTS)
+            elif has_tools and model == "loop-model":
+                n = _anthropic_tool_result_count(body)
+                if n == 0:
+                    self._send_sse(
+                        _anthropic_tool_round(
+                            "toolu_loop_1", "read_file", {"file_path": "pyproject.toml"},
+                            text="我先看看项目结构。",
+                        )
+                    )
+                elif n == 1:
+                    self._send_sse(
+                        _anthropic_tool_round(
+                            "toolu_loop_2", "run_command", {"command": "echo hello from loop"}
+                        )
+                    )
+                else:
+                    self._send_sse(_anthropic_text_round("**完成！** 项目没问题。"))
+            elif has_tools and model == "multi-tool-model":
+                self._send_sse(_anthropic_multi_tool_events())
+            elif has_tools and model == "unknown-tool-model":
+                self._send_sse(_anthropic_tool_round("toolu_unk", "no_such_tool", {}))
+            elif has_tools and model == "never-stop-model":
+                self._send_sse(
+                    _anthropic_tool_round("toolu_never", "read_file", {"file_path": "pyproject.toml"})
+                )
             elif "thinking" in body:
                 self._send_sse(ANTHROPIC_EVENTS)
             else:
@@ -149,6 +500,31 @@ class MockHandler(BaseHTTPRequestHandler):
                 self._send_sse(OPENAI_CMD_CHUNKS)
             elif has_tools and model == "tool-badjson-model":
                 self._send_sse(OPENAI_BADJSON_CHUNKS)
+            elif has_tools and model == "loop-model":
+                n = _openai_tool_result_count(body)
+                if n == 0:
+                    self._send_sse(
+                        _openai_tool_round_chunks(
+                            "call_loop_1", "read_file", {"file_path": "pyproject.toml"},
+                            text="我先看看项目结构。",
+                        )
+                    )
+                elif n == 1:
+                    self._send_sse(
+                        _openai_tool_round_chunks(
+                            "call_loop_2", "run_command", {"command": "echo hello from loop"}
+                        )
+                    )
+                else:
+                    self._send_sse(_openai_text_round_chunks("**完成！** 项目没问题。"))
+            elif has_tools and model == "multi-tool-model":
+                self._send_sse(_openai_multi_tool_chunks())
+            elif has_tools and model == "unknown-tool-model":
+                self._send_sse(_openai_tool_round_chunks("call_unk", "no_such_tool", {}))
+            elif has_tools and model == "never-stop-model":
+                self._send_sse(
+                    _openai_tool_round_chunks("call_never", "read_file", {"file_path": "pyproject.toml"})
+                )
             else:
                 self._send_sse(OPENAI_CHUNKS)
         else:
