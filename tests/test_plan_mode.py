@@ -132,3 +132,62 @@ def test_help_lists_plan_and_do():
     assert "/plan" in COMMAND_NAMES and "/do" in COMMAND_NAMES
     _, feedback = handle_command("/help", ChatSession(), FakeAgent())
     assert "/plan" in feedback and "/do" in feedback
+
+
+# ---------------------------------------------------------------------------
+# 计划模式执行拦截：副作用工具不执行
+# ---------------------------------------------------------------------------
+
+import asyncio
+
+from mewcode.agent.events import RoundEnd, RoundEndReason, ToolResultEvent
+from mewcode.agent.loop import Agent
+from mewcode.provider.base import Done, TextDelta, ToolCall
+from mewcode.session import ChatSession
+from mewcode.tools import create_registry
+
+
+class ScriptedProvider:
+    """脚本化 Provider：handler(第几次调用, messages, tools) → 事件列表。"""
+
+    def __init__(self, handler):
+        self._handler = handler
+        self.calls = 0
+
+    def stream(self, messages, tools):
+        self.calls += 1
+        return iter(self._handler(self.calls, messages, tools))
+
+
+def test_plan_mode_blocks_side_effect_tools(tmp_path):
+    """计划模式下模型调用写工具：不执行、回灌失败结果（F7 只放开读类工具）。"""
+    target = tmp_path / "should_not_exist.txt"
+    session = ChatSession()
+
+    def handler(n, messages, tools):
+        if n == 1:
+            return [
+                ToolCall(
+                    id="t1", name="run_command", args={"command": f"echo x > {target}"}
+                ),
+                Done(),
+            ]
+        return [TextDelta("计划如下…"), Done()]
+
+    agent = Agent(ScriptedProvider(handler), create_registry(), session)
+    agent.enter_plan_mode()
+
+    async def go():
+        return [e async for e in agent.run("写个文件")]
+
+    events = asyncio.run(go())
+    # 副作用工具被拒绝：文件未创建
+    assert not target.exists()
+    results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(results) == 1
+    assert "计划模式已禁用" in results[0].result.content
+    assert results[0].result.ok is False
+    # 结果已回灌，模型下一轮能看到拒绝原因
+    # 消息序：plan 提示 → 用户问题 → assistant → 工具结果 → 最终 assistant
+    assert "计划模式已禁用" in session.messages[3].tool_results[0].content
+    assert isinstance(events[-1], RoundEnd) and events[-1].reason is RoundEndReason.OK

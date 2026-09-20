@@ -11,6 +11,7 @@
 - [ ] 五种停止条件各有测试路径（验证：`python -m pytest tests/test_agent_loop.py -q`，OK/LIMIT/CANCELLED/UNKNOWN_TOOL/ERROR 断言全绿）（AC2）
 - [ ] 两家协议 usage 解析（验证：`python -m pytest tests/test_provider_tools.py tests/test_providers.py -q` 全绿）（AC8）
 - [ ] Plan Mode：/plan /do 幂等、提示注入、工具收窄为三个只读工具（验证：`python -m pytest tests/test_plan_mode.py -q` 全绿）（AC7）
+- [ ] 计划模式下模型调用写工具被拦截：不执行、回灌「计划模式已禁用」失败结果（验证：`python -m pytest tests/test_plan_mode.py::test_plan_mode_blocks_side_effect_tools -q` 通过）（AC7）
 
 ## 集成
 

@@ -254,13 +254,23 @@ class Agent:
                 if self._cancelled_now():
                     raise _Cancelled()
                 side_results: list = []
-                for call in side_effect:
-                    yield ToolCallStarted(call)
-                    side_results.append(
-                        await asyncio.to_thread(execute_call, self._registry, call)
-                    )
-                    if self._cancelled_now():
-                        raise _Cancelled()
+                if self._plan_mode:
+                    # 计划模式只放开读类工具：副作用工具不执行，回灌失败结果（F7）
+                    for call in side_effect:
+                        yield ToolCallStarted(call)
+                        side_results.append(
+                            ToolResult.failure(
+                                "计划模式已禁用该工具（仅只读工具可用，输入 /do 切回执行模式）"
+                            )
+                        )
+                else:
+                    for call in side_effect:
+                        yield ToolCallStarted(call)
+                        side_results.append(
+                            await asyncio.to_thread(execute_call, self._registry, call)
+                        )
+                        if self._cancelled_now():
+                            raise _Cancelled()
                 # 执行完、回灌前再查取消：取消则丢弃本轮结果，不写会话
                 if self._cancelled_now():
                     raise _Cancelled()
