@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from enum import Enum, auto
 
+from mewcode.agent.loop import Agent
 from mewcode.session import ChatSession
 
 
@@ -15,7 +16,7 @@ class CommandResult(Enum):
 
 
 # 可用命令列表（供补全与 /help 展示）
-COMMAND_NAMES = ["/exit", "/clear", "/help"]
+COMMAND_NAMES = ["/exit", "/clear", "/help", "/plan", "/do"]
 
 _HELP_TEXT = "\n".join(
     [
@@ -23,12 +24,16 @@ _HELP_TEXT = "\n".join(
         "  /exit   退出 MewCode",
         "  /clear  清空对话上下文，重新开始",
         "  /help   显示本帮助",
+        "  /plan   进入计划模式：仅只读工具可用，模型先调研并给出计划",
+        "  /do     退出计划模式：切回全部工具，按计划执行",
         "输入历史可用上下方向键回溯。",
     ]
 )
 
 
-def handle_command(text: str, session: ChatSession) -> tuple[CommandResult, str]:
+def handle_command(
+    text: str, session: ChatSession, agent: Agent
+) -> tuple[CommandResult, str]:
     """处理斜杠命令，返回（结果，反馈文本）。
 
     反馈文本由 TUI 显示，可能是命令说明、清空提示或未知命令提示。
@@ -41,4 +46,17 @@ def handle_command(text: str, session: ChatSession) -> tuple[CommandResult, str]
         return CommandResult.CONTINUE, "已清空对话上下文，重新开始。"
     if command == "/help":
         return CommandResult.CONTINUE, _HELP_TEXT
+    if command == "/plan":
+        if agent.plan_mode:
+            return CommandResult.CONTINUE, "已在计划模式（仅只读工具可用，输入 /do 切回执行模式）。"
+        agent.enter_plan_mode()
+        return CommandResult.CONTINUE, (
+            "已进入计划模式：仅只读工具可用，模型会先调研并给出计划。"
+            "审阅满意后输入 /do 切回执行模式。"
+        )
+    if command == "/do":
+        if agent.plan_mode:
+            agent.exit_plan_mode()
+            return CommandResult.CONTINUE, "已切回执行模式，可以按计划动手了。"
+        return CommandResult.CONTINUE, "当前不在计划模式。"
     return CommandResult.CONTINUE, f"未知命令: {command}（输入 /help 查看可用命令）"

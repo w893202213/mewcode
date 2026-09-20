@@ -31,7 +31,7 @@ class ToolResultEvent:
 
 @dataclass
 class UsageEvent:
-    """一次 LLM 调用的 token 用量（TUI 累计展示）。"""
+    """本轮循环截至当前的累计 token 用量（每次 LLM 调用后发射，TUI 展示）。"""
 
     input_tokens: int
     output_tokens: int
