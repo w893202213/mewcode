@@ -9,6 +9,7 @@ from pathlib import Path
 
 from mewcode.config import ConfigError, load_config, select_profile
 from mewcode.provider import create_provider
+from mewcode.tools import create_registry
 from mewcode.tui.app import run
 
 # 配置文件默认路径
@@ -44,4 +45,5 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(1)
 
     provider = create_provider(config)
-    run(provider, config)
+    registry = create_registry()
+    run(provider, config, registry)

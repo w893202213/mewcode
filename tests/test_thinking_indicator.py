@@ -2,8 +2,10 @@
 
 from rich.console import Console
 
+from mewcode.agent import ToolRunner
 from mewcode.provider.base import Done, ProviderError, TextDelta
 from mewcode.session import ChatSession
+from mewcode.tools import create_registry
 from mewcode.tui.app import ThinkingIndicator, _chat_round, _stream_renderable
 from mewcode.tui.double_press import DoublePressTracker
 
@@ -71,7 +73,7 @@ def test_stream_renderable_reply_started():
 class FakeProvider:
     """极简假 Provider：直接产出正文增量与结束事件。"""
 
-    def stream(self, messages):
+    def stream(self, messages, tools=None):
         yield TextDelta("你好")
         yield Done()
 
@@ -80,7 +82,11 @@ def test_chat_round_no_user_echo():
     """一轮对话不再回显用户原文：输出不含用户问题与「▸ 你」前缀，含助手回复。"""
     console = Console(record=True, force_terminal=False)
     session = ChatSession()
-    _chat_round(console, FakeProvider(), session, "我的问题", DoublePressTracker())
+    registry = create_registry()
+    runner = ToolRunner(registry, session)
+    _chat_round(
+        console, FakeProvider(), session, registry, runner, "我的问题", DoublePressTracker()
+    )
     out = console.export_text()
     assert "我的问题" not in out
     assert "▸ 你" not in out
@@ -93,7 +99,7 @@ def test_chat_round_no_user_echo():
 class ErrorProvider:
     """流中途抛错的假 Provider：用于验证错误面板上方无计时残留。"""
 
-    def stream(self, messages):
+    def stream(self, messages, tools=None):
         raise ProviderError("服务端返回错误: mock 服务过载")
 
 
@@ -101,7 +107,11 @@ def test_chat_round_error_no_timer_leftover():
     """错误路径：显示请求失败面板，计时行不残留。"""
     console = Console(record=True, force_terminal=False)
     session = ChatSession()
-    _chat_round(console, ErrorProvider(), session, "测试错误", DoublePressTracker())
+    registry = create_registry()
+    runner = ToolRunner(registry, session)
+    _chat_round(
+        console, ErrorProvider(), session, registry, runner, "测试错误", DoublePressTracker()
+    )
     out = console.export_text()
     assert "请求失败" in out
     assert "服务端返回错误: mock 服务过载" in out

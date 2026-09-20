@@ -21,6 +21,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from mewcode import __version__
+from mewcode.agent import ToolRunner
 from mewcode.config import ProviderConfig
 from mewcode.provider.base import (
     Done,
@@ -30,6 +31,7 @@ from mewcode.provider.base import (
     ThinkingDelta,
 )
 from mewcode.session import ChatSession
+from mewcode.tools import ToolRegistry
 from mewcode.tui.commands import CommandResult, COMMAND_NAMES, handle_command
 from mewcode.tui.double_press import DoublePressTracker, ExitSignal
 
@@ -54,9 +56,10 @@ def _print_welcome(console: Console, config: ProviderConfig) -> None:
     )
 
 
-def run(provider: Provider, config: ProviderConfig) -> None:
+def run(provider: Provider, config: ProviderConfig, registry: ToolRegistry) -> None:
     """TUI 主循环：读输入 → 命令或对话 → 回到输入。"""
     session = ChatSession()
+    runner = ToolRunner(registry, session)  # confirm 回调 T15 接入
 
     # 双击 Ctrl+C 判定：第一次提示（不清行），3 秒内第二次退出
     tracker = DoublePressTracker()
@@ -104,13 +107,15 @@ def run(provider: Provider, config: ProviderConfig) -> None:
                 if result is CommandResult.EXIT:
                     return
                 continue
-            _chat_round(console, provider, session, text, tracker)
+            _chat_round(console, provider, session, registry, runner, text, tracker)
 
 
 def _chat_round(
     console: Console,
     provider: Provider,
     session: ChatSession,
+    registry: ToolRegistry,
+    runner: ToolRunner,
     text: str,
     tracker: DoublePressTracker,
 ) -> None:
@@ -135,7 +140,7 @@ def _chat_round(
             indicator, console=console, refresh_per_second=10, vertical_overflow="visible"
         ) as live:
             try:
-                for event in provider.stream(session.messages, []):  # tools 占位，T13 换 registry.list()
+                for event in provider.stream(session.messages, registry.list()):
                     if isinstance(event, ThinkingDelta):
                         thinking_text += event.text
                         live.update(
