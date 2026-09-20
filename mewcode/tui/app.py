@@ -164,7 +164,7 @@ def _consume_events(console: Console, q: queue.Queue, usage: dict[str, int]) -> 
     def render() -> None:
         if live is not None:
             live.update(
-                _stream_renderable(iteration, thinking, "".join(reply), indicator)
+                _stream_renderable(thinking, "".join(reply), indicator, iteration)
             )
 
     def close_live() -> None:
