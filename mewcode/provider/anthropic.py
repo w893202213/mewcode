@@ -16,8 +16,10 @@ from mewcode.provider.base import (
     StreamEvent,
     TextDelta,
     ThinkingDelta,
+    ToolCall,
 )
 from mewcode.session import Message
+from mewcode.tools.base import Tool
 
 # 内置常量（配置中无对应字段）
 DEFAULT_MAX_TOKENS = 8192
@@ -25,15 +27,34 @@ THINKING_BUDGET = 4096  # 官方下限 1024，且必须小于 max_tokens
 API_VERSION = "2023-06-01"
 
 
-def _build_payload(config: ProviderConfig, messages: list[Message]) -> dict[str, Any]:
-    """把对话历史转成 Messages API 请求体。"""
+def _build_payload(
+    config: ProviderConfig, messages: list[Message], tools: list[Tool]
+) -> dict[str, Any]:
+    """把对话历史与工具列表转成 Messages API 请求体。"""
     body_messages: list[dict[str, Any]] = []
     for m in messages:
         if m.role == "user":
-            body_messages.append({"role": "user", "content": m.text})
+            if m.tool_results:
+                # 工具结果：content 为 tool_result 块列表（text 为空时不拼 text 块）
+                content = [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": r.tool_use_id,
+                        "content": r.content,
+                        "is_error": r.is_error,
+                    }
+                    for r in m.tool_results
+                ]
+                body_messages.append({"role": "user", "content": content})
+            else:
+                body_messages.append({"role": "user", "content": m.text})
         else:
             # assistant 消息按 content 数组组装；思考块必须原样回传（官方硬性要求）
             content: list[dict[str, Any]] = [dict(b) for b in m.thinking_raw]
+            for use in m.tool_uses:
+                content.append(
+                    {"type": "tool_use", "id": use.id, "name": use.name, "input": use.args}
+                )
             content.append({"type": "text", "text": m.text})
             body_messages.append({"role": "assistant", "content": content})
     payload: dict[str, Any] = {
@@ -42,6 +63,11 @@ def _build_payload(config: ProviderConfig, messages: list[Message]) -> dict[str,
         "stream": True,
         "messages": body_messages,
     }
+    if tools:
+        payload["tools"] = [
+            {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+            for t in tools
+        ]
     if config.thinking:
         payload["thinking"] = {"type": "enabled", "budget_tokens": THINKING_BUDGET}
     # 注意：不设置 temperature（与 extended thinking 互斥）
@@ -89,7 +115,7 @@ class AnthropicProvider(Provider):
     def __init__(self, config: ProviderConfig) -> None:
         self._config = config
 
-    def stream(self, messages: list[Message]) -> Iterator[StreamEvent]:
+    def stream(self, messages: list[Message], tools: list[Tool]) -> Iterator[StreamEvent]:
         """发起流式请求，逐个产出归一化事件；失败抛 ProviderError。"""
         url = f"{self._config.base_url}/v1/messages"
         headers = {
@@ -102,7 +128,10 @@ class AnthropicProvider(Provider):
         try:
             with httpx.Client(timeout=timeout) as client:
                 with client.stream(
-                    "POST", url, headers=headers, json=_build_payload(self._config, messages)
+                    "POST",
+                    url,
+                    headers=headers,
+                    json=_build_payload(self._config, messages, tools),
                 ) as resp:
                     if resp.status_code != 200:
                         raise ProviderError(_http_error_message(resp))
@@ -113,11 +142,16 @@ class AnthropicProvider(Provider):
     def _iter_events(self, objects: Iterator[dict]) -> Iterator[StreamEvent]:
         """把已解析的事件对象分派成归一化流事件（纯逻辑，可脱离网络测试）。
 
-        同时收集思考块的原始内容（含签名），流结束时随 Done 交给调用方回存。
+        同时收集思考块的原始内容（含签名），流结束时随 Done 交给调用方回存；
+        工具调用（tool_use）的 input_json_delta 碎片在块内累积，块结束时
+        拼接解析成 ToolCall 事件。
         """
         current_thinking: list[str] | None = None  # None = 当前不在思考块内
         thinking_signature = ""
         thinking_blocks: list[dict] = []
+
+        # 工具调用块状态：None = 不在 tool_use 块内
+        current_tool: dict[str, Any] | None = None  # {"id", "name", "fragments"}
 
         for obj in objects:
             obj_type = obj.get("type")
@@ -126,6 +160,12 @@ class AnthropicProvider(Provider):
                 if block.get("type") == "thinking":
                     current_thinking = []
                     thinking_signature = block.get("signature", "")
+                elif block.get("type") == "tool_use":
+                    current_tool = {
+                        "id": block.get("id", ""),
+                        "name": block.get("name", ""),
+                        "fragments": [],
+                    }
             elif obj_type == "content_block_delta":
                 delta = obj.get("delta") or {}
                 if delta.get("type") == "thinking_delta":
@@ -138,6 +178,10 @@ class AnthropicProvider(Provider):
                     yield ThinkingDelta(piece)
                 elif delta.get("type") == "text_delta":
                     yield TextDelta(delta.get("text", ""))
+                elif delta.get("type") == "input_json_delta":
+                    # 工具参数 JSON 碎片：追加累积，块结束时统一解析
+                    if current_tool is not None:
+                        current_tool["fragments"].append(delta.get("partial_json", ""))
             elif obj_type == "content_block_stop":
                 if current_thinking is not None:
                     thinking_blocks.append(
@@ -148,9 +192,29 @@ class AnthropicProvider(Provider):
                         }
                     )
                     current_thinking = None
+                if current_tool is not None:
+                    yield from self._finish_tool_call(current_tool)
+                    current_tool = None
             elif obj_type == "message_stop":
                 yield Done(thinking_raw=thinking_blocks)
                 return
             elif obj_type == "error":
                 error = obj.get("error") or {}
                 raise ProviderError(f"服务端返回错误: {error.get('message', obj)}")
+
+    def _finish_tool_call(self, tool: dict[str, Any]) -> Iterator[StreamEvent]:
+        """把累积完成的 tool_use 块解析成 ToolCall（参数解析失败时携带 parse_error）。"""
+        raw = "".join(tool["fragments"])
+        try:
+            args = json.loads(raw) if raw else {}
+            if not isinstance(args, dict):
+                raise ValueError("参数不是 JSON 对象")
+            yield ToolCall(id=tool["id"], name=tool["name"], args=args)
+        except (json.JSONDecodeError, ValueError) as e:
+            snippet = raw[:100] + ("…" if len(raw) > 100 else "")
+            yield ToolCall(
+                id=tool["id"],
+                name=tool["name"],
+                args={},
+                parse_error=f"工具参数 JSON 解析失败: {e}（原始片段: {snippet!r}）",
+            )

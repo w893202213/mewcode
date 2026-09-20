@@ -135,7 +135,7 @@ def _chat_round(
             indicator, console=console, refresh_per_second=10, vertical_overflow="visible"
         ) as live:
             try:
-                for event in provider.stream(session.messages):
+                for event in provider.stream(session.messages, []):  # tools 占位，T13 换 registry.list()
                     if isinstance(event, ThinkingDelta):
                         thinking_text += event.text
                         live.update(

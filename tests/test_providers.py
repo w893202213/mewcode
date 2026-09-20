@@ -100,7 +100,7 @@ def _cfg(protocol: str, model: str = "m", thinking: bool = False, base_url: str 
 
 def test_anthropic_stream_events(mock_server):
     provider = create_provider(_cfg("anthropic", base_url=mock_server))
-    events = list(provider.stream([Message(role="user", text="问")]))
+    events = list(provider.stream([Message(role="user", text="问")], []))
     assert [type(e).__name__ for e in events] == ["ThinkingDelta", "TextDelta", "TextDelta", "Done"]
     text = "".join(e.text for e in events if isinstance(e, TextDelta))
     assert text == "答案是42"
@@ -113,7 +113,7 @@ def test_anthropic_stream_events(mock_server):
 
 def test_anthropic_request_body_with_thinking(mock_server):
     provider = create_provider(_cfg("anthropic", thinking=True, base_url=mock_server))
-    list(provider.stream([Message(role="user", text="问")]))
+    list(provider.stream([Message(role="user", text="问")], []))
     body = MockHandler.received[-1]["body"]
     assert body["thinking"] == {"type": "enabled", "budget_tokens": 4096}
     assert body["stream"] is True
@@ -122,7 +122,7 @@ def test_anthropic_request_body_with_thinking(mock_server):
 
 def test_anthropic_request_body_without_thinking(mock_server):
     provider = create_provider(_cfg("anthropic", base_url=mock_server))
-    list(provider.stream([Message(role="user", text="问")]))
+    list(provider.stream([Message(role="user", text="问")], []))
     assert "thinking" not in MockHandler.received[-1]["body"]
 
 
@@ -131,11 +131,11 @@ def test_thinking_blocks_roundtrip(mock_server):
     provider = create_provider(_cfg("anthropic", base_url=mock_server))
     session = ChatSession()
     session.add_user("你好")
-    events = list(provider.stream(session.messages))
+    events = list(provider.stream(session.messages, []))
     done = next(e for e in events if isinstance(e, Done))
     session.add_assistant(text="答案是42", thinking="让我想想", thinking_raw=done.thinking_raw)
     session.add_user("继续")
-    list(provider.stream(session.messages))
+    list(provider.stream(session.messages, []))
     assistant_msg = MockHandler.received[-1]["body"]["messages"][1]
     assert assistant_msg["content"] == [
         {"type": "thinking", "thinking": "让我想想", "signature": "sig-1"},
@@ -145,7 +145,7 @@ def test_thinking_blocks_roundtrip(mock_server):
 
 def test_openai_stream_events(mock_server):
     provider = create_provider(_cfg("openai", base_url=mock_server))
-    events = list(provider.stream([Message(role="user", text="问")]))
+    events = list(provider.stream([Message(role="user", text="问")], []))
     text = "".join(e.text for e in events if isinstance(e, TextDelta))
     assert text == "你好！"
     assert isinstance(events[-1], Done)
@@ -153,7 +153,7 @@ def test_openai_stream_events(mock_server):
 
 def test_openai_request_body_thinking_passthrough(mock_server):
     provider = create_provider(_cfg("openai", thinking=True, base_url=mock_server))
-    list(provider.stream([Message(role="user", text="问")]))
+    list(provider.stream([Message(role="user", text="问")], []))
     body = MockHandler.received[-1]["body"]
     assert body["thinking"] is True
     assert body["messages"] == [{"role": "user", "content": "问"}]
@@ -162,10 +162,10 @@ def test_openai_request_body_thinking_passthrough(mock_server):
 def test_anthropic_midstream_error(mock_server):
     provider = create_provider(_cfg("anthropic", model="error-model", base_url=mock_server))
     with pytest.raises(ProviderError, match="服务过载"):
-        list(provider.stream([Message(role="user", text="问")]))
+        list(provider.stream([Message(role="user", text="问")], []))
 
 
 def test_openai_http_401(mock_server):
     provider = create_provider(_cfg("openai", model="unauthorized-model", base_url=mock_server))
     with pytest.raises(ProviderError, match="鉴权失败"):
-        list(provider.stream([Message(role="user", text="问")]))
+        list(provider.stream([Message(role="user", text="问")], []))
