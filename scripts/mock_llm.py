@@ -41,6 +41,66 @@ ANTHROPIC_EVENTS = [
     '{"type":"message_stop"}',
 ]
 
+# Anthropic 工具调用流：read_file 调用（参数 JSON 分 4 片流式下发）
+ANTHROPIC_TOOL_EVENTS = [
+    '{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_mock_1","name":"read_file","input":{}}}',
+    '{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"file_"}}',
+    '{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"path\\": \\"py"}}',
+    '{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"project.to"}}',
+    '{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"ml\\"}"}}',
+    '{"type":"content_block_stop","index":0}',
+    '{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":42}}',
+    '{"type":"message_stop"}',
+]
+
+# Anthropic 工具调用流：run_command 调用（用于验证命令确认交互）
+ANTHROPIC_CMD_EVENTS = [
+    '{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_cmd_1","name":"run_command","input":{}}}',
+    '{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"command\\": \\"echo "}}',
+    '{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"hello from "}}',
+    '{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"tool\\"}"}}',
+    '{"type":"content_block_stop","index":0}',
+    '{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":42}}',
+    '{"type":"message_stop"}',
+]
+
+# Anthropic 工具调用流：参数拼不出合法 JSON（异常路径）
+ANTHROPIC_BADJSON_EVENTS = [
+    '{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_bad_1","name":"read_file","input":{}}}',
+    '{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"file_path\\": "}}',
+    '{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"坏掉的"}}',
+    '{"type":"content_block_stop","index":0}',
+    '{"type":"message_stop"}',
+]
+
+# OpenAI 工具调用流：read_file 调用（arguments 分 3 片、带 index）
+OPENAI_TOOL_CHUNKS = [
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}]}',
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_mock_1","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}]}',
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"file_path\\": \\"py"}}]},"finish_reason":null}]}',
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"project.toml\\"}"}}]},"finish_reason":null}]}',
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+    'data: [DONE]',
+]
+
+# OpenAI 工具调用流：run_command 调用
+OPENAI_CMD_CHUNKS = [
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}]}',
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_cmd_1","type":"function","function":{"name":"run_command","arguments":""}}]},"finish_reason":null}]}',
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"command\\": \\"echo hello from tool\\"}"}}]},"finish_reason":null}]}',
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+    'data: [DONE]',
+]
+
+# OpenAI 工具调用流：参数拼不出合法 JSON（异常路径）
+OPENAI_BADJSON_CHUNKS = [
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}]}',
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_bad_1","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}]}',
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{oops"}}]},"finish_reason":null}]}',
+    '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+    'data: [DONE]',
+]
+
 OPENAI_CHUNKS = [
     '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}',
     '{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"**你好！** "},"finish_reason":null}]}',
@@ -61,11 +121,18 @@ class MockHandler(BaseHTTPRequestHandler):
         with open("mock_requests.log", "a", encoding="utf-8") as f:
             f.write(json.dumps({"path": self.path, "body": body}, ensure_ascii=False) + "\n")
         model = body.get("model", "")
+        has_tools = bool(body.get("tools"))
         if self.path.endswith("/v1/messages"):
             if model == "error-model":
                 self._send_sse(['{"type":"error","error":{"type":"overloaded_error","message":"mock 服务过载"}}'])
             elif model == "unauthorized-model":
                 self._send_json(401, {"error": {"message": "mock invalid api key"}})
+            elif has_tools and model == "tool-model":
+                self._send_sse(ANTHROPIC_TOOL_EVENTS)
+            elif has_tools and model == "tool-cmd-model":
+                self._send_sse(ANTHROPIC_CMD_EVENTS)
+            elif has_tools and model == "tool-badjson-model":
+                self._send_sse(ANTHROPIC_BADJSON_EVENTS)
             elif "thinking" in body:
                 self._send_sse(ANTHROPIC_EVENTS)
             else:
@@ -76,6 +143,12 @@ class MockHandler(BaseHTTPRequestHandler):
                 self._send_sse(['{"error":{"message":"mock 服务出错"}}'])
             elif model == "unauthorized-model":
                 self._send_json(401, {"error": {"message": "mock invalid api key"}})
+            elif has_tools and model == "tool-model":
+                self._send_sse(OPENAI_TOOL_CHUNKS)
+            elif has_tools and model == "tool-cmd-model":
+                self._send_sse(OPENAI_CMD_CHUNKS)
+            elif has_tools and model == "tool-badjson-model":
+                self._send_sse(OPENAI_BADJSON_CHUNKS)
             else:
                 self._send_sse(OPENAI_CHUNKS)
         else:

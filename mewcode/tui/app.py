@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 
@@ -29,8 +30,9 @@ from mewcode.provider.base import (
     ProviderError,
     TextDelta,
     ThinkingDelta,
+    ToolCall,
 )
-from mewcode.session import ChatSession
+from mewcode.session import ChatSession, ToolUse
 from mewcode.tools import ToolRegistry
 from mewcode.tui.commands import CommandResult, COMMAND_NAMES, handle_command
 from mewcode.tui.double_press import DoublePressTracker, ExitSignal
@@ -41,6 +43,9 @@ _ASSISTANT_PREFIX = "[bold magenta]🐱 MewCode[/bold magenta]"
 _TIMER_STYLE = "grey50"
 # Ctrl+C 双击退出提示（显示在输入行下方 bottom_toolbar）
 _EXIT_HINT = "再按一次 Ctrl+C 退出"
+# 工具调用展示截断：参数摘要 200 字符、结果面板 2000 字符（显示截断，回灌内容不受影响）
+_ARGS_SUMMARY_CHARS = 200
+_DISPLAY_RESULT_CHARS = 2000
 
 
 def _print_welcome(console: Console, config: ProviderConfig) -> None:
@@ -59,7 +64,6 @@ def _print_welcome(console: Console, config: ProviderConfig) -> None:
 def run(provider: Provider, config: ProviderConfig, registry: ToolRegistry) -> None:
     """TUI 主循环：读输入 → 命令或对话 → 回到输入。"""
     session = ChatSession()
-    runner = ToolRunner(registry, session)  # confirm 回调 T15 接入
 
     # 双击 Ctrl+C 判定：第一次提示（不清行），3 秒内第二次退出
     tracker = DoublePressTracker()
@@ -88,6 +92,22 @@ def run(provider: Provider, config: ProviderConfig, registry: ToolRegistry) -> N
     with patch_stdout(raw=True):
         console = Console()
         _print_welcome(console, config)
+
+        # 命令执行确认：先展示完整命令，再等用户输入 y/n；空输入与 Ctrl+C 一律拒绝（安全默认）
+        confirm_session = PromptSession(
+            message=[("class:prompt", "执行命令? [y/N] ")],
+        )
+
+        def confirm(command: str) -> bool:
+            console.print(Text(f"$ {command}", style="bold"))
+            try:
+                answer = confirm_session.prompt().strip().lower()
+            except (KeyboardInterrupt, EOFError):
+                console.print("（已取消，视为拒绝）")
+                return False
+            return answer in ("y", "yes")
+
+        runner = ToolRunner(registry, session, confirm=confirm)
         while True:
             try:
                 text = prompt_session.prompt()
@@ -129,6 +149,9 @@ def _chat_round(
     reply_buffer: list[str] = []
     thinking_text = ""
     thinking_raw: list[dict] = []
+    # 工具调用：本步每轮只执行第一个，其余计数提示忽略（F8）
+    first_call: ToolCall | None = None
+    ignored_calls = 0
 
     try:
         # 助手回复前缀独立成行，流式内容渲染在它下方
@@ -151,17 +174,32 @@ def _chat_round(
                         live.update(
                             _stream_renderable(thinking_text, "".join(reply_buffer), indicator)
                         )
+                    elif isinstance(event, ToolCall):
+                        if first_call is None:
+                            first_call = event
+                        else:
+                            ignored_calls += 1
                     elif isinstance(event, Done):
                         thinking_raw = event.thinking_raw
             except (ProviderError, KeyboardInterrupt):
                 # 清空 Live 区域：错误/中断面板上方不残留计时行或半截正文
                 live.update(Text(""), refresh=True)
                 raise
-        session.add_assistant(
-            text="".join(reply_buffer),
-            thinking=thinking_text,
-            thinking_raw=thinking_raw,
-        )
+        if first_call is not None:
+            # 工具轮次：记录 assistant 消息（含工具调用），执行并展示结果
+            session.add_assistant(
+                text="".join(reply_buffer),
+                thinking=thinking_text,
+                thinking_raw=thinking_raw,
+                tool_uses=[ToolUse(id=first_call.id, name=first_call.name, args=first_call.args)],
+            )
+            _run_tool_round(console, runner, first_call, ignored_calls)
+        else:
+            session.add_assistant(
+                text="".join(reply_buffer),
+                thinking=thinking_text,
+                thinking_raw=thinking_raw,
+            )
     except ProviderError as e:
         # 回滚本轮 user 消息：未被处理的输入不留在上下文里
         del session.messages[start_index:]
@@ -176,6 +214,37 @@ def _chat_round(
                 title="[bold yellow]回复中断[/bold yellow]",
                 border_style="yellow",
             )
+        )
+
+
+def _run_tool_round(
+    console: Console, runner: ToolRunner, call: ToolCall, ignored_calls: int
+) -> None:
+    """展示工具调用 → 执行（含确认拦截）→ 展示结果（F9）。
+
+    结果面板按显示上限截断；回灌会话的内容由 run_tool 按 30000 字符上限截断，
+    两者互不影响。
+    """
+    args_summary = json.dumps(call.args, ensure_ascii=False)
+    if len(args_summary) > _ARGS_SUMMARY_CHARS:
+        args_summary = args_summary[: _ARGS_SUMMARY_CHARS] + "…"
+    console.print(Text(f"🔧 {call.name} {args_summary}", style="dim"))
+    if ignored_calls:
+        console.print(
+            Text(f"另有 {ignored_calls} 个工具调用本步忽略（每轮只执行一个工具）", style="dim")
+        )
+
+    result = runner.run(call)
+    display = result.content
+    if len(display) > _DISPLAY_RESULT_CHARS:
+        display = display[: _DISPLAY_RESULT_CHARS] + f"\n…（终端显示截断，共 {len(result.content)} 字符）"
+    if result.ok:
+        console.print(
+            Panel(display, title="[bold green]工具结果[/bold green]", border_style="green")
+        )
+    else:
+        console.print(
+            Panel(display, title="[bold red]工具失败[/bold red]", border_style="red")
         )
 
 
