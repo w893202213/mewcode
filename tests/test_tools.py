@@ -238,3 +238,15 @@ def test_run_command_timeout():
 def test_run_command_requires_confirmation():
     assert RunCommandTool.requires_confirmation is True
     assert ReadFileTool.requires_confirmation is False
+
+
+def test_tool_read_only_markers():
+    """只读标记：读三个 True；写/改/命令三个 False（plan 模式过滤 + 分批并发判定共用）。"""
+    from mewcode.tools import create_registry
+
+    registry = create_registry()
+    read_only = [t.name for t in registry.list() if t.read_only]
+    assert read_only == ["find_files", "grep_code", "read_file"]
+    assert registry.get("write_file").read_only is False
+    assert registry.get("edit_file").read_only is False
+    assert registry.get("run_command").read_only is False

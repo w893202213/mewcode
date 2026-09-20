@@ -17,6 +17,7 @@ from mewcode.provider.base import (
     TextDelta,
     ThinkingDelta,
     ToolCall,
+    UsageInfo,
 )
 from mewcode.session import Message
 from mewcode.tools.base import Tool
@@ -153,6 +154,10 @@ class AnthropicProvider(Provider):
         # 工具调用块状态：None = 不在 tool_use 块内
         current_tool: dict[str, Any] | None = None  # {"id", "name", "fragments"}
 
+        # token 用量：message_delta 携带，流结束随 Done 带出
+        usage_in = 0
+        usage_out = 0
+
         for obj in objects:
             obj_type = obj.get("type")
             if obj_type == "content_block_start":
@@ -195,8 +200,17 @@ class AnthropicProvider(Provider):
                 if current_tool is not None:
                     yield from self._finish_tool_call(current_tool)
                     current_tool = None
+            elif obj_type == "message_delta":
+                usage = obj.get("usage") or {}
+                usage_in = int(usage.get("input_tokens") or 0)
+                usage_out = int(usage.get("output_tokens") or 0)
             elif obj_type == "message_stop":
-                yield Done(thinking_raw=thinking_blocks)
+                usage = (
+                    UsageInfo(input_tokens=usage_in, output_tokens=usage_out)
+                    if usage_in or usage_out
+                    else None
+                )
+                yield Done(thinking_raw=thinking_blocks, usage=usage)
                 return
             elif obj_type == "error":
                 error = obj.get("error") or {}

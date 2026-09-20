@@ -43,10 +43,20 @@ class ToolCall:
 
 
 @dataclass
+class UsageInfo:
+    """一次 LLM 调用的 token 用量（各家协议解析后归一化）。"""
+
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass
 class Done:
-    """流正常结束，附带需要回传的原始思考块（Anthropic 多轮要求原样回传）。"""
+    """流正常结束，附带需要回传的原始思考块（Anthropic 多轮要求原样回传）
+    与本轮 token 用量（协议流未携带时为 None）。"""
 
     thinking_raw: list[dict] = field(default_factory=list)
+    usage: UsageInfo | None = None
 
 
 # 归一化流事件联合类型

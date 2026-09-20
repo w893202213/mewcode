@@ -22,7 +22,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from mewcode import __version__
-from mewcode.agent import ToolRunner
+from mewcode.agent import execute_call
 from mewcode.config import ProviderConfig
 from mewcode.provider.base import (
     Done,
@@ -32,7 +32,7 @@ from mewcode.provider.base import (
     ThinkingDelta,
     ToolCall,
 )
-from mewcode.session import ChatSession, ToolUse
+from mewcode.session import ChatSession, ToolResultRecord, ToolUse
 from mewcode.tools import ToolRegistry
 from mewcode.tui.commands import CommandResult, COMMAND_NAMES, handle_command
 from mewcode.tui.double_press import DoublePressTracker, ExitSignal
@@ -93,21 +93,6 @@ def run(provider: Provider, config: ProviderConfig, registry: ToolRegistry) -> N
         console = Console()
         _print_welcome(console, config)
 
-        # 命令执行确认：先展示完整命令，再等用户输入 y/n；空输入与 Ctrl+C 一律拒绝（安全默认）
-        confirm_session = PromptSession(
-            message=[("class:prompt", "执行命令? [y/N] ")],
-        )
-
-        def confirm(command: str) -> bool:
-            console.print(Text(f"$ {command}", style="bold"))
-            try:
-                answer = confirm_session.prompt().strip().lower()
-            except (KeyboardInterrupt, EOFError):
-                console.print("（已取消，视为拒绝）")
-                return False
-            return answer in ("y", "yes")
-
-        runner = ToolRunner(registry, session, confirm=confirm)
         while True:
             try:
                 text = prompt_session.prompt()
@@ -127,7 +112,7 @@ def run(provider: Provider, config: ProviderConfig, registry: ToolRegistry) -> N
                 if result is CommandResult.EXIT:
                     return
                 continue
-            _chat_round(console, provider, session, registry, runner, text, tracker)
+            _chat_round(console, provider, session, registry, text, tracker)
 
 
 def _chat_round(
@@ -135,7 +120,6 @@ def _chat_round(
     provider: Provider,
     session: ChatSession,
     registry: ToolRegistry,
-    runner: ToolRunner,
     text: str,
     tracker: DoublePressTracker,
 ) -> None:
@@ -193,7 +177,7 @@ def _chat_round(
                 thinking_raw=thinking_raw,
                 tool_uses=[ToolUse(id=first_call.id, name=first_call.name, args=first_call.args)],
             )
-            _run_tool_round(console, runner, first_call, ignored_calls)
+            _run_tool_round(console, registry, session, first_call, ignored_calls)
         else:
             session.add_assistant(
                 text="".join(reply_buffer),
@@ -218,9 +202,13 @@ def _chat_round(
 
 
 def _run_tool_round(
-    console: Console, runner: ToolRunner, call: ToolCall, ignored_calls: int
+    console: Console,
+    registry: ToolRegistry,
+    session: ChatSession,
+    call: ToolCall,
+    ignored_calls: int,
 ) -> None:
-    """展示工具调用 → 执行（含确认拦截）→ 展示结果（F9）。
+    """展示工具调用 → 执行 → 结果回灌 + 展示。
 
     结果面板按显示上限截断；回灌会话的内容由 run_tool 按 30000 字符上限截断，
     两者互不影响。
@@ -234,7 +222,12 @@ def _run_tool_round(
             Text(f"另有 {ignored_calls} 个工具调用本步忽略（每轮只执行一个工具）", style="dim")
         )
 
-    result = runner.run(call)
+    result = execute_call(registry, call)
+    session.add_tool_result(
+        ToolResultRecord(
+            tool_use_id=call.id, content=result.content, is_error=not result.ok
+        )
+    )
     display = result.content
     if len(display) > _DISPLAY_RESULT_CHARS:
         display = display[: _DISPLAY_RESULT_CHARS] + f"\n…（终端显示截断，共 {len(result.content)} 字符）"

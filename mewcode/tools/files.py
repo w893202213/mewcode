@@ -49,6 +49,7 @@ class WriteFileTool(Tool):
     """写入（创建或覆盖）文本文件。"""
 
     name: ClassVar[str] = "write_file"
+    read_only: ClassVar[bool] = False  # 修改文件系统：有副作用，plan 模式不可用
     description: ClassVar[str] = (
         "把 content 写入 file_path 指定的文件（不存在则创建，存在则覆盖），"
         "父目录不存在时自动创建。"
@@ -78,6 +79,7 @@ class EditFileTool(Tool):
     """按原文唯一匹配替换文件内容。"""
 
     name: ClassVar[str] = "edit_file"
+    read_only: ClassVar[bool] = False  # 修改文件系统：有副作用，plan 模式不可用
     description: ClassVar[str] = (
         "把文件中的 old_text 原文替换为 new_text。old_text 必须在文件中"
         "恰好出现一次（唯一匹配），否则不会修改文件并返回错误。"

@@ -45,7 +45,8 @@ class Tool(ABC):
     description: ClassVar[str]  # 工具描述（模型可见）
     input_schema: ClassVar[dict]  # 参数 JSON Schema（模型可见）
     timeout: ClassVar[float] = DEFAULT_TIMEOUT  # 执行超时上限（秒）
-    requires_confirmation: ClassVar[bool] = False  # 执行前是否需人工确认
+    requires_confirmation: ClassVar[bool] = False  # 执行前是否需人工确认（待后续安全章节）
+    read_only: ClassVar[bool] = True  # 只读标记：plan 模式过滤 + 分批并发判定共用
 
     @abstractmethod
     def execute(self, args: dict) -> ToolResult:

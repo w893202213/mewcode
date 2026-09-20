@@ -169,3 +169,11 @@ def test_openai_http_401(mock_server):
     provider = create_provider(_cfg("openai", model="unauthorized-model", base_url=mock_server))
     with pytest.raises(ProviderError, match="鉴权失败"):
         list(provider.stream([Message(role="user", text="问")], []))
+
+
+def test_openai_request_body_has_stream_options(mock_server):
+    """include_usage 已开启：请求体带 stream_options（F8 token 用量）。"""
+    provider = create_provider(_cfg("openai", base_url=mock_server))
+    list(provider.stream([Message(role="user", text="问")], []))
+    body = MockHandler.received[-1]["body"]
+    assert body["stream_options"] == {"include_usage": True}

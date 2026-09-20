@@ -235,3 +235,67 @@ def test_payloads_empty_tools_omitted():
     assert "tools" not in ap
     op = openai_payload(_config("openai"), [Message(role="user", text="问")], [])
     assert "tools" not in op
+
+
+# ---------------------------------------------------------------------------
+# T2: Anthropic message_delta usage 解析
+# ---------------------------------------------------------------------------
+
+def test_anthropic_message_delta_usage_in_done():
+    events = [
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "你好"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 123, "output_tokens": 45}},
+        {"type": "message_stop"},
+    ]
+    provider = AnthropicProvider(_config())
+    events = list(provider._iter_events(_events(events)))
+    done = events[-1]
+    assert isinstance(done, Done)
+    assert done.usage.input_tokens == 123
+    assert done.usage.output_tokens == 45
+
+
+def test_anthropic_usage_none_without_message_delta():
+    events = [
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "你好"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop"},
+    ]
+    provider = AnthropicProvider(_config())
+    done = list(provider._iter_events(_events(events)))[-1]
+    assert isinstance(done, Done)
+    assert done.usage is None
+
+
+# ---------------------------------------------------------------------------
+# T3: OpenAI usage 解析
+# ---------------------------------------------------------------------------
+
+def test_openai_usage_on_finish_chunk_in_done():
+    chunks = [
+        {"id": "c1", "choices": [{"index": 0, "delta": {"content": "你好"}, "finish_reason": None}]},
+        {
+            "id": "c1",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 77, "completion_tokens": 8},
+        },
+    ]
+    provider = OpenAIProvider(_config("openai"))
+    done = list(provider._iter_events(_events(chunks)))[-1]
+    assert isinstance(done, Done)
+    assert done.usage.input_tokens == 77
+    assert done.usage.output_tokens == 8
+
+
+def test_openai_usage_none_without_usage_chunk():
+    chunks = [
+        {"id": "c1", "choices": [{"index": 0, "delta": {"content": "你好"}, "finish_reason": None}]},
+        {"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    provider = OpenAIProvider(_config("openai"))
+    done = list(provider._iter_events(_events(chunks)))[-1]
+    assert isinstance(done, Done)
+    assert done.usage is None

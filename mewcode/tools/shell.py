@@ -17,7 +17,7 @@ class RunCommandTool(Tool):
     name: ClassVar[str] = "run_command"
     description: ClassVar[str] = (
         "在 shell 中执行一条命令（工作目录为 MewCode 启动目录），"
-        "返回标准输出、标准错误与退出码。执行前会请用户确认。"
+        "返回标准输出、标准错误与退出码。"
     )
     input_schema: ClassVar[dict] = {
         "type": "object",
@@ -27,6 +27,7 @@ class RunCommandTool(Tool):
         "required": ["command"],
     }
     requires_confirmation: ClassVar[bool] = True
+    read_only: ClassVar[bool] = False  # 执行任意命令：有副作用，plan 模式不可用
 
     def execute(self, args: dict) -> ToolResult:
         command = args["command"]

@@ -9,7 +9,15 @@ from typing import Any
 import httpx
 
 from mewcode.config import ProviderConfig
-from mewcode.provider.base import Done, Provider, ProviderError, StreamEvent, TextDelta, ToolCall
+from mewcode.provider.base import (
+    Done,
+    Provider,
+    ProviderError,
+    StreamEvent,
+    TextDelta,
+    ToolCall,
+    UsageInfo,
+)
 from mewcode.session import Message
 from mewcode.tools.base import Tool
 
@@ -55,6 +63,8 @@ def _build_payload(
         "model": config.model,
         "messages": body_messages,
         "stream": True,
+        # 让最终 chunk 携带 token 用量（F8）
+        "stream_options": {"include_usage": True},
     }
     if tools:
         payload["tools"] = [
@@ -148,12 +158,20 @@ class OpenAIProvider(Provider):
         # index → {"id", "name", "arguments_fragments"}
         tool_calls: dict[int, dict[str, Any]] = {}
 
+        # token 用量：include_usage 让最终 chunk 携带（可能附在 finish chunk 或独立的空 choices chunk）
+        usage_in = 0
+        usage_out = 0
+
         for obj in objects:
             # 错误对象优先处理
             error = obj.get("error")
             if error:
                 message = error.get("message", error) if isinstance(error, dict) else error
                 raise ProviderError(f"服务端返回错误: {message}")
+            usage = obj.get("usage")
+            if usage:
+                usage_in = int(usage.get("prompt_tokens") or 0)
+                usage_out = int(usage.get("completion_tokens") or 0)
             choices = obj.get("choices") or []
             if not choices:
                 continue
@@ -173,14 +191,19 @@ class OpenAIProvider(Provider):
                     slot["name"] = function["name"]
                 if function.get("arguments"):
                     slot["arguments"].append(function["arguments"])
+            usage_info = (
+                UsageInfo(input_tokens=usage_in, output_tokens=usage_out)
+                if usage_in or usage_out
+                else None
+            )
             if choice.get("finish_reason") == "tool_calls":
                 # 工具调用轮次：逐条解析累积的参数碎片
                 for index in sorted(tool_calls):
                     yield from self._finish_tool_call(tool_calls[index])
-                yield Done()
+                yield Done(usage=usage_info)
                 return
             if choice.get("finish_reason"):
-                yield Done()
+                yield Done(usage=usage_info)
                 return
 
     def _finish_tool_call(self, slot: dict[str, Any]) -> Iterator[StreamEvent]:

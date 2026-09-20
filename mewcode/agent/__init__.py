@@ -1,5 +1,5 @@
-"""Agent 层：工具调用的执行与结果回灌（自动循环留待下一章）。"""
+"""Agent 层：工具执行与 Agent Loop（ch05）。"""
 
-from mewcode.agent.runner import ToolRunner
+from mewcode.agent.executor import execute_call
 
-__all__ = ["ToolRunner"]
+__all__ = ["execute_call"]
