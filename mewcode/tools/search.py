@@ -29,6 +29,7 @@ class FindFilesTool(Tool):
     description: ClassVar[str] = (
         "按 glob 模式查找文件（如 **/*.py、src/*.ts）。"
         "path 为搜索根目录，缺省为当前目录；返回匹配文件的相对路径列表。"
+        "找文件请用本工具，不要用 shell 的 find。"
     )
     input_schema: ClassVar[dict] = {
         "type": "object",
@@ -68,6 +69,7 @@ class GrepCodeTool(Tool):
         "按正则表达式搜索目录下文本文件的内容，返回 文件:行号: 内容 列表。"
         "path 为搜索根目录，缺省为当前目录；case_sensitive 缺省为 true。"
         "跳过二进制文件与 .git/.venv 等目录。"
+        "搜代码请用本工具，不要用 shell 的 grep。"
     )
     input_schema: ClassVar[dict] = {
         "type": "object",

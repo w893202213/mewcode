@@ -18,6 +18,8 @@ class RunCommandTool(Tool):
     description: ClassVar[str] = (
         "在 shell 中执行一条命令（工作目录为 MewCode 启动目录），"
         "返回标准输出、标准错误与退出码。"
+        "仅当专用工具（read_file/write_file/edit_file/find_files/grep_code）"
+        "覆盖不到的需求才使用本工具。"
     )
     input_schema: ClassVar[dict] = {
         "type": "object",

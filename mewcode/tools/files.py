@@ -18,6 +18,7 @@ class ReadFileTool(Tool):
     description: ClassVar[str] = (
         "读取文本文件内容。file_path 为相对或绝对路径；limit 可选，"
         "限制返回的最大行数（从文件开头截取），缺省返回全文。"
+        "读文件请用本工具，不要用 shell 的 cat/sed。"
     )
     input_schema: ClassVar[dict] = {
         "type": "object",
@@ -52,7 +53,7 @@ class WriteFileTool(Tool):
     read_only: ClassVar[bool] = False  # 修改文件系统：有副作用，plan 模式不可用
     description: ClassVar[str] = (
         "把 content 写入 file_path 指定的文件（不存在则创建，存在则覆盖），"
-        "父目录不存在时自动创建。"
+        "父目录不存在时自动创建。覆盖写入前请先确认目标文件的当前内容。"
     )
     input_schema: ClassVar[dict] = {
         "type": "object",
@@ -84,6 +85,7 @@ class EditFileTool(Tool):
         "把文件中的 old_text 原文替换为 new_text。old_text 必须在文件中"
         "恰好出现一次（唯一匹配），否则不会修改文件并返回错误。"
         "old_text 不唯一时请提供更长的上下文使其唯一。"
+        "修改文件前必须先用 read_file 读取该文件当前内容，确保 old_text 与文件一致。"
     )
     input_schema: ClassVar[dict] = {
         "type": "object",
