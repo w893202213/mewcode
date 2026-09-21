@@ -132,3 +132,7 @@ class PermissionGate:
         """循环切换档位并返回新档位。"""
         self.mode = self.mode.next()
         return self.mode
+
+    def validate_tools(self, known: set[str]) -> None:
+        """校验文件规则引用的工具名都在已知集合内（MCP 注册完成后调用，ch08 F8）。"""
+        self._rules.validate_tools(known)

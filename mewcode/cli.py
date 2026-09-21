@@ -14,6 +14,7 @@ from mewcode.config import (
     load_permission_mode,
     select_profile,
 )
+from mewcode.mcp import McpManager, load_mcp_servers
 from mewcode.permissions import PermissionGate, RuleSet
 from mewcode.provider import create_provider
 from mewcode.tools import create_registry
@@ -61,17 +62,37 @@ def _build_gate(config_path: str) -> PermissionGate:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """入口：配置错误打印到 stderr 并以非零码退出。"""
+    """入口：配置错误打印到 stderr 并以非零码退出。
+
+    装配顺序（ch08）：providers → 闸门 → 内置工具 → MCP 发现注册
+    （内部警告不抛）→ 规则工具名统一校验 → TUI；退出时统一关闭
+    全部 MCP 连接（终止子进程）。
+    """
     args = _parse_args(argv)
     try:
         configs = load_config(args.config)
         config = select_profile(configs, args.profile)
         gate = _build_gate(args.config)
+        mcp_servers = load_mcp_servers(
+            args.config, Path.cwd() / ".mewcode" / "config.yaml"
+        )
     except ConfigError as e:
         print(f"配置错误: {e}", file=sys.stderr)
         sys.exit(1)
 
     provider = create_provider(config)
     registry = create_registry()
+    manager = McpManager(mcp_servers)
+    manager.discover_and_register(registry)
+    try:
+        gate.validate_tools({tool.name for tool in registry.list()})
+    except ConfigError as e:
+        print(f"配置错误: {e}", file=sys.stderr)
+        manager.shutdown()  # 清理已启动的 MCP 连接
+        sys.exit(1)
+
     custom_instructions = load_custom_instructions(args.config)
-    run(provider, config, registry, custom_instructions, gate)
+    try:
+        run(provider, config, registry, custom_instructions, gate)
+    finally:
+        manager.shutdown()
