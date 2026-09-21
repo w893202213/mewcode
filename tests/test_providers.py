@@ -8,11 +8,15 @@ import pytest
 
 from mewcode.config import ProviderConfig
 from mewcode.provider import create_provider
-from mewcode.provider.base import Done, ProviderError, TextDelta
+from mewcode.provider.base import Done, ProviderError, SystemPrompt, TextDelta
 from mewcode.session import ChatSession, Message
 
-# mock 服务返回的 Anthropic SSE 事件序列（含思考块 + 文本块）
+# 不关心系统提示的调用点统一传入空 SystemPrompt（请求体省略 system 字段）
+_NO_SYSTEM = SystemPrompt("", "")
+
+# mock 服务返回的 Anthropic SSE 事件序列（message_start 用量 + 思考块 + 文本块）
 ANTHROPIC_EVENTS = [
+    '{"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":1,"cache_creation_input_tokens":80,"cache_read_input_tokens":0}}}',
     '{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}',
     '{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"让我想想","signature":"sig-1"}}',
     '{"type":"content_block_stop","index":0}',
@@ -100,7 +104,7 @@ def _cfg(protocol: str, model: str = "m", thinking: bool = False, base_url: str 
 
 def test_anthropic_stream_events(mock_server):
     provider = create_provider(_cfg("anthropic", base_url=mock_server))
-    events = list(provider.stream([Message(role="user", text="问")], []))
+    events = list(provider.stream([Message(role="user", text="问")], [], _NO_SYSTEM))
     assert [type(e).__name__ for e in events] == ["ThinkingDelta", "TextDelta", "TextDelta", "Done"]
     text = "".join(e.text for e in events if isinstance(e, TextDelta))
     assert text == "答案是42"
@@ -113,7 +117,7 @@ def test_anthropic_stream_events(mock_server):
 
 def test_anthropic_request_body_with_thinking(mock_server):
     provider = create_provider(_cfg("anthropic", thinking=True, base_url=mock_server))
-    list(provider.stream([Message(role="user", text="问")], []))
+    list(provider.stream([Message(role="user", text="问")], [], _NO_SYSTEM))
     body = MockHandler.received[-1]["body"]
     assert body["thinking"] == {"type": "enabled", "budget_tokens": 4096}
     assert body["stream"] is True
@@ -122,7 +126,7 @@ def test_anthropic_request_body_with_thinking(mock_server):
 
 def test_anthropic_request_body_without_thinking(mock_server):
     provider = create_provider(_cfg("anthropic", base_url=mock_server))
-    list(provider.stream([Message(role="user", text="问")], []))
+    list(provider.stream([Message(role="user", text="问")], [], _NO_SYSTEM))
     assert "thinking" not in MockHandler.received[-1]["body"]
 
 
@@ -131,11 +135,11 @@ def test_thinking_blocks_roundtrip(mock_server):
     provider = create_provider(_cfg("anthropic", base_url=mock_server))
     session = ChatSession()
     session.add_user("你好")
-    events = list(provider.stream(session.messages, []))
+    events = list(provider.stream(session.messages, [], _NO_SYSTEM))
     done = next(e for e in events if isinstance(e, Done))
     session.add_assistant(text="答案是42", thinking="让我想想", thinking_raw=done.thinking_raw)
     session.add_user("继续")
-    list(provider.stream(session.messages, []))
+    list(provider.stream(session.messages, [], _NO_SYSTEM))
     assistant_msg = MockHandler.received[-1]["body"]["messages"][1]
     assert assistant_msg["content"] == [
         {"type": "thinking", "thinking": "让我想想", "signature": "sig-1"},
@@ -145,7 +149,7 @@ def test_thinking_blocks_roundtrip(mock_server):
 
 def test_openai_stream_events(mock_server):
     provider = create_provider(_cfg("openai", base_url=mock_server))
-    events = list(provider.stream([Message(role="user", text="问")], []))
+    events = list(provider.stream([Message(role="user", text="问")], [], _NO_SYSTEM))
     text = "".join(e.text for e in events if isinstance(e, TextDelta))
     assert text == "你好！"
     assert isinstance(events[-1], Done)
@@ -153,7 +157,7 @@ def test_openai_stream_events(mock_server):
 
 def test_openai_request_body_thinking_passthrough(mock_server):
     provider = create_provider(_cfg("openai", thinking=True, base_url=mock_server))
-    list(provider.stream([Message(role="user", text="问")], []))
+    list(provider.stream([Message(role="user", text="问")], [], _NO_SYSTEM))
     body = MockHandler.received[-1]["body"]
     assert body["thinking"] is True
     assert body["messages"] == [{"role": "user", "content": "问"}]
@@ -162,18 +166,18 @@ def test_openai_request_body_thinking_passthrough(mock_server):
 def test_anthropic_midstream_error(mock_server):
     provider = create_provider(_cfg("anthropic", model="error-model", base_url=mock_server))
     with pytest.raises(ProviderError, match="服务过载"):
-        list(provider.stream([Message(role="user", text="问")], []))
+        list(provider.stream([Message(role="user", text="问")], [], _NO_SYSTEM))
 
 
 def test_openai_http_401(mock_server):
     provider = create_provider(_cfg("openai", model="unauthorized-model", base_url=mock_server))
     with pytest.raises(ProviderError, match="鉴权失败"):
-        list(provider.stream([Message(role="user", text="问")], []))
+        list(provider.stream([Message(role="user", text="问")], [], _NO_SYSTEM))
 
 
 def test_openai_request_body_has_stream_options(mock_server):
     """include_usage 已开启：请求体带 stream_options（F8 token 用量）。"""
     provider = create_provider(_cfg("openai", base_url=mock_server))
-    list(provider.stream([Message(role="user", text="问")], []))
+    list(provider.stream([Message(role="user", text="问")], [], _NO_SYSTEM))
     body = MockHandler.received[-1]["body"]
     assert body["stream_options"] == {"include_usage": True}

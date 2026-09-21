@@ -6,10 +6,13 @@ import pytest
 
 from mewcode.config import ProviderConfig
 from mewcode.provider.anthropic import AnthropicProvider, _build_payload as anthropic_payload
-from mewcode.provider.base import Done, ToolCall
+from mewcode.provider.base import Done, SystemPrompt, ToolCall
 from mewcode.provider.openai import OpenAIProvider, _build_payload as openai_payload
 from mewcode.session import ChatSession, Message, ToolResultRecord, ToolUse
 from mewcode.tools import create_registry
+
+# 不关心系统提示的调用点统一传入空 SystemPrompt（请求体省略 system 字段）
+_NO_SYSTEM = SystemPrompt("", "")
 
 
 def _config(protocol: str = "anthropic") -> ProviderConfig:
@@ -162,7 +165,7 @@ def _tool_session() -> ChatSession:
 
 
 def test_anthropic_payload_replay_blocks():
-    payload = anthropic_payload(_config(), _tool_session().messages, [])
+    payload = anthropic_payload(_config(), _tool_session().messages, [], _NO_SYSTEM)
     msgs = payload["messages"]
     # assistant 消息：tool_use 块 + text 块
     assistant = msgs[1]
@@ -186,13 +189,13 @@ def test_anthropic_payload_error_result_is_error():
     s.add_user("跑命令")
     s.add_assistant("", tool_uses=[ToolUse(id="toolu_2", name="run_command", args={"command": "rm x"})])
     s.add_tool_result(ToolResultRecord("toolu_2", "用户拒绝", is_error=True))
-    payload = anthropic_payload(_config(), s.messages, [])
+    payload = anthropic_payload(_config(), s.messages, [], _NO_SYSTEM)
     result_msg = payload["messages"][2]
     assert result_msg["content"][0]["is_error"] is True
 
 
 def test_openai_payload_replay_blocks():
-    payload = openai_payload(_config("openai"), _tool_session().messages, [])
+    payload = openai_payload(_config("openai"), _tool_session().messages, [], _NO_SYSTEM)
     msgs = payload["messages"]
     # assistant 消息：content 置空 + tool_calls
     assistant = msgs[1]
@@ -216,13 +219,13 @@ def test_openai_payload_replay_blocks():
 def test_payloads_include_tools_field():
     registry = create_registry()
     tools = registry.list()
-    ap = anthropic_payload(_config(), [Message(role="user", text="问")], tools)
+    ap = anthropic_payload(_config(), [Message(role="user", text="问")], tools, _NO_SYSTEM)
     assert len(ap["tools"]) == 6
     t = ap["tools"][0]
     assert set(t) == {"name", "description", "input_schema"}
     assert t["input_schema"]["type"] == "object"
 
-    op = openai_payload(_config("openai"), [Message(role="user", text="问")], tools)
+    op = openai_payload(_config("openai"), [Message(role="user", text="问")], tools, _NO_SYSTEM)
     assert len(op["tools"]) == 6
     f = op["tools"][0]
     assert f["type"] == "function"
@@ -231,9 +234,9 @@ def test_payloads_include_tools_field():
 
 def test_payloads_empty_tools_omitted():
     """tools 为空时不携带 tools 字段（保持既有纯文本请求兼容）。"""
-    ap = anthropic_payload(_config(), [Message(role="user", text="问")], [])
+    ap = anthropic_payload(_config(), [Message(role="user", text="问")], [], _NO_SYSTEM)
     assert "tools" not in ap
-    op = openai_payload(_config("openai"), [Message(role="user", text="问")], [])
+    op = openai_payload(_config("openai"), [Message(role="user", text="问")], [], _NO_SYSTEM)
     assert "tools" not in op
 
 
@@ -242,11 +245,13 @@ def test_payloads_empty_tools_omitted():
 # ---------------------------------------------------------------------------
 
 def test_anthropic_message_delta_usage_in_done():
+    """输入与缓存来自 message_start、输出来自 message_delta（真实协议形态）。"""
     events = [
+        {"type": "message_start", "message": {"usage": {"input_tokens": 123, "cache_creation_input_tokens": 90, "cache_read_input_tokens": 33}}},
         {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
         {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "你好"}},
         {"type": "content_block_stop", "index": 0},
-        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 123, "output_tokens": 45}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 45}},
         {"type": "message_stop"},
     ]
     provider = AnthropicProvider(_config())
@@ -255,6 +260,22 @@ def test_anthropic_message_delta_usage_in_done():
     assert isinstance(done, Done)
     assert done.usage.input_tokens == 123
     assert done.usage.output_tokens == 45
+    assert done.usage.cache_hit_tokens == 33
+    assert done.usage.cache_write_tokens == 90
+
+
+def test_anthropic_message_start_cache_fields_optional():
+    """message_start 不携带缓存字段时，Done.usage 的缓存字段为 None（优雅降级）。"""
+    events = [
+        {"type": "message_start", "message": {"usage": {"input_tokens": 10}}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop"},
+    ]
+    provider = AnthropicProvider(_config())
+    done = list(provider._iter_events(_events(events)))[-1]
+    assert isinstance(done, Done)
+    assert done.usage.cache_hit_tokens is None
+    assert done.usage.cache_write_tokens is None
 
 
 def test_anthropic_usage_none_without_message_delta():
@@ -299,3 +320,95 @@ def test_openai_usage_none_without_usage_chunk():
     done = list(provider._iter_events(_events(chunks)))[-1]
     assert isinstance(done, Done)
     assert done.usage is None
+
+
+# ---------------------------------------------------------------------------
+# ch06: system 块、缓存断点与动态补充
+# ---------------------------------------------------------------------------
+
+def test_anthropic_system_blocks_with_breakpoint():
+    """stable 块带缓存断点、dynamic 块紧随其后不带断点。"""
+    system = SystemPrompt(stable="稳定指令", dynamic="<supplement>动态补充</supplement>")
+    payload = anthropic_payload(_config(), [Message(role="user", text="问")], [], system)
+    assert payload["system"] == [
+        {"type": "text", "text": "稳定指令", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "<supplement>动态补充</supplement>"},
+    ]
+
+
+def test_anthropic_system_single_part():
+    """只有 stable 时单块（带断点）；只有 dynamic 时单块（不带断点）。"""
+    payload = anthropic_payload(
+        _config(), [Message(role="user", text="问")], [], SystemPrompt("稳定", "")
+    )
+    assert payload["system"] == [
+        {"type": "text", "text": "稳定", "cache_control": {"type": "ephemeral"}}
+    ]
+    payload = anthropic_payload(
+        _config(), [Message(role="user", text="问")], [], SystemPrompt("", "动态")
+    )
+    assert payload["system"] == [{"type": "text", "text": "动态"}]
+
+
+def test_anthropic_empty_system_omitted():
+    """stable/dynamic 均空时请求体不含 system 字段（纯文本请求兼容）。"""
+    payload = anthropic_payload(_config(), [Message(role="user", text="问")], [], _NO_SYSTEM)
+    assert "system" not in payload
+
+
+def test_anthropic_last_tool_carries_breakpoint():
+    """最后一个工具带缓存断点，其余工具不带——系统提示+工具整体成缓存前缀。"""
+    tools = create_registry().list()
+    payload = anthropic_payload(_config(), [Message(role="user", text="问")], tools, _NO_SYSTEM)
+    assert payload["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    for t in payload["tools"][:-1]:
+        assert "cache_control" not in t
+
+
+# ---------------------------------------------------------------------------
+# ch06: OpenAI system 消息与缓存命中解析
+# ---------------------------------------------------------------------------
+
+def test_openai_system_message_stable_first():
+    """system 消息在消息列表第一条：stable 在最前、dynamic 拼接其后。"""
+    system = SystemPrompt(stable="稳定指令", dynamic="<supplement>动态补充</supplement>")
+    payload = openai_payload(_config("openai"), [Message(role="user", text="问")], [], system)
+    assert payload["messages"][0] == {
+        "role": "system",
+        "content": "稳定指令\n\n<supplement>动态补充</supplement>",
+    }
+    assert payload["messages"][1] == {"role": "user", "content": "问"}
+
+
+def test_openai_system_dynamic_only():
+    """只有 dynamic 时 system 消息仅含 dynamic；均空时省略 system 消息。"""
+    payload = openai_payload(
+        _config("openai"), [Message(role="user", text="问")], [], SystemPrompt("", "动态")
+    )
+    assert payload["messages"][0] == {"role": "system", "content": "动态"}
+    payload = openai_payload(_config("openai"), [Message(role="user", text="问")], [], _NO_SYSTEM)
+    assert payload["messages"][0] == {"role": "user", "content": "问"}
+
+
+def test_openai_prompt_cache_hit_parsed():
+    """usage 的 prompt_cache_hit_tokens 归一化为 cache_hit_tokens；miss 丢弃。"""
+    chunks = [
+        {"id": "c1", "choices": [{"index": 0, "delta": {"content": "你好"}, "finish_reason": None}]},
+        {
+            "id": "c1",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 8,
+                "prompt_cache_hit_tokens": 400,
+                "prompt_cache_miss_tokens": 100,
+            },
+        },
+    ]
+    provider = OpenAIProvider(_config("openai"))
+    done = list(provider._iter_events(_events(chunks)))[-1]
+    assert isinstance(done, Done)
+    assert done.usage.input_tokens == 500
+    assert done.usage.output_tokens == 8
+    assert done.usage.cache_hit_tokens == 400
+    assert done.usage.cache_write_tokens is None

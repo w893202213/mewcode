@@ -14,6 +14,7 @@ from mewcode.provider.base import (
     Provider,
     ProviderError,
     StreamEvent,
+    SystemPrompt,
     TextDelta,
     ThinkingDelta,
     ToolCall,
@@ -29,9 +30,18 @@ API_VERSION = "2023-06-01"
 
 
 def _build_payload(
-    config: ProviderConfig, messages: list[Message], tools: list[Tool]
+    config: ProviderConfig,
+    messages: list[Message],
+    tools: list[Tool],
+    system: SystemPrompt,
 ) -> dict[str, Any]:
-    """把对话历史与工具列表转成 Messages API 请求体。"""
+    """把对话历史、工具列表与系统提示转成 Messages API 请求体。
+
+    系统提示为块列表：stable 块末尾加缓存断点（进入可缓存前缀），
+    dynamic 补充块紧随其后、绝不携带断点（每轮变化不打断缓存）。
+    stable/dynamic 均空时省略 system 字段；最后一个工具加缓存断点，
+    让「系统提示+工具描述」整体成为缓存前缀。
+    """
     body_messages: list[dict[str, Any]] = []
     for m in messages:
         if m.role == "user":
@@ -64,11 +74,27 @@ def _build_payload(
         "stream": True,
         "messages": body_messages,
     }
+    # system 块列表：stable 块带缓存断点，dynamic 块不带
+    system_blocks: list[dict[str, Any]] = []
+    if system.stable:
+        system_blocks.append(
+            {
+                "type": "text",
+                "text": system.stable,
+                "cache_control": {"type": "ephemeral"},
+            }
+        )
+    if system.dynamic:
+        system_blocks.append({"type": "text", "text": system.dynamic})
+    if system_blocks:
+        payload["system"] = system_blocks
     if tools:
         payload["tools"] = [
             {"name": t.name, "description": t.description, "input_schema": t.input_schema}
             for t in tools
         ]
+        # 最后一个工具加缓存断点：系统提示+工具描述整体进入缓存前缀
+        payload["tools"][-1]["cache_control"] = {"type": "ephemeral"}
     if config.thinking:
         payload["thinking"] = {"type": "enabled", "budget_tokens": THINKING_BUDGET}
     # 注意：不设置 temperature（与 extended thinking 互斥）
@@ -116,7 +142,9 @@ class AnthropicProvider(Provider):
     def __init__(self, config: ProviderConfig) -> None:
         self._config = config
 
-    def stream(self, messages: list[Message], tools: list[Tool]) -> Iterator[StreamEvent]:
+    def stream(
+        self, messages: list[Message], tools: list[Tool], system: SystemPrompt
+    ) -> Iterator[StreamEvent]:
         """发起流式请求，逐个产出归一化事件；失败抛 ProviderError。"""
         url = f"{self._config.base_url}/v1/messages"
         headers = {
@@ -132,7 +160,7 @@ class AnthropicProvider(Provider):
                     "POST",
                     url,
                     headers=headers,
-                    json=_build_payload(self._config, messages, tools),
+                    json=_build_payload(self._config, messages, tools, system),
                 ) as resp:
                     if resp.status_code != 200:
                         raise ProviderError(_http_error_message(resp))
@@ -154,13 +182,23 @@ class AnthropicProvider(Provider):
         # 工具调用块状态：None = 不在 tool_use 块内
         current_tool: dict[str, Any] | None = None  # {"id", "name", "fragments"}
 
-        # token 用量：message_delta 携带，流结束随 Done 带出
+        # token 用量：message_start 携带输入与缓存字段、message_delta 携带输出，
+        # 两者合并后随 Done 带出（流结束）
         usage_in = 0
         usage_out = 0
+        cache_hit: int | None = None  # 从缓存读取的量（cache_read_input_tokens）
+        cache_write: int | None = None  # 写入缓存的量（cache_creation_input_tokens）
 
         for obj in objects:
             obj_type = obj.get("type")
-            if obj_type == "content_block_start":
+            if obj_type == "message_start":
+                usage = (obj.get("message") or {}).get("usage") or {}
+                usage_in = int(usage.get("input_tokens") or 0)
+                if usage.get("cache_read_input_tokens") is not None:
+                    cache_hit = int(usage["cache_read_input_tokens"])
+                if usage.get("cache_creation_input_tokens") is not None:
+                    cache_write = int(usage["cache_creation_input_tokens"])
+            elif obj_type == "content_block_start":
                 block = obj.get("content_block") or {}
                 if block.get("type") == "thinking":
                     current_thinking = []
@@ -202,12 +240,19 @@ class AnthropicProvider(Provider):
                     current_tool = None
             elif obj_type == "message_delta":
                 usage = obj.get("usage") or {}
-                usage_in = int(usage.get("input_tokens") or 0)
+                # 输入与缓存字段以 message_start 为准；此处仅合并输出（兼容个别服务在 delta 携带输入）
+                if usage.get("input_tokens"):
+                    usage_in = int(usage["input_tokens"])
                 usage_out = int(usage.get("output_tokens") or 0)
             elif obj_type == "message_stop":
                 usage = (
-                    UsageInfo(input_tokens=usage_in, output_tokens=usage_out)
-                    if usage_in or usage_out
+                    UsageInfo(
+                        input_tokens=usage_in,
+                        output_tokens=usage_out,
+                        cache_hit_tokens=cache_hit,
+                        cache_write_tokens=cache_write,
+                    )
+                    if usage_in or usage_out or cache_hit is not None or cache_write is not None
                     else None
                 )
                 yield Done(thinking_raw=thinking_blocks, usage=usage)

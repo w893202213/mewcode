@@ -14,6 +14,7 @@ from mewcode.provider.base import (
     Provider,
     ProviderError,
     StreamEvent,
+    SystemPrompt,
     TextDelta,
     ToolCall,
     UsageInfo,
@@ -23,14 +24,26 @@ from mewcode.tools.base import Tool
 
 
 def _build_payload(
-    config: ProviderConfig, messages: list[Message], tools: list[Tool]
+    config: ProviderConfig,
+    messages: list[Message],
+    tools: list[Tool],
+    system: SystemPrompt,
 ) -> dict[str, Any]:
-    """把对话历史与工具列表转成 chat/completions 请求体。
+    """把对话历史、工具列表与系统提示转成 chat/completions 请求体。
 
     只携带 role + content 文本；thinking/thinking_raw 不回传（OpenAI 协议无此机制）。
     工具调用回放为 assistant 的 tool_calls；工具结果回放为 tool 角色消息。
+
+    系统提示为消息列表第一条的 system 角色消息：stable 排在最前（依赖
+    服务端自动前缀缓存命中），dynamic 拼接其后；两者均空时省略该消息。
     """
     body_messages: list[dict[str, Any]] = []
+    # 系统消息：stable 在前 → 自动前缀缓存只缓存稳定部分，dynamic 变化不打断命中
+    system_text = system.stable
+    if system.dynamic:
+        system_text = f"{system_text}\n\n{system.dynamic}" if system_text else system.dynamic
+    if system_text:
+        body_messages.append({"role": "system", "content": system_text})
     for m in messages:
         if m.role == "assistant" and m.tool_uses:
             # 工具调用轮次：content 置空，tool_calls 按协议结构重建
@@ -126,7 +139,9 @@ class OpenAIProvider(Provider):
     def __init__(self, config: ProviderConfig) -> None:
         self._config = config
 
-    def stream(self, messages: list[Message], tools: list[Tool]) -> Iterator[StreamEvent]:
+    def stream(
+        self, messages: list[Message], tools: list[Tool], system: SystemPrompt
+    ) -> Iterator[StreamEvent]:
         """发起流式请求，逐个产出归一化事件；失败抛 ProviderError。"""
         url = f"{self._config.base_url}/v1/chat/completions"
         headers = {
@@ -141,7 +156,7 @@ class OpenAIProvider(Provider):
                     "POST",
                     url,
                     headers=headers,
-                    json=_build_payload(self._config, messages, tools),
+                    json=_build_payload(self._config, messages, tools, system),
                 ) as resp:
                     if resp.status_code != 200:
                         raise ProviderError(_http_error_message(resp))
@@ -161,6 +176,7 @@ class OpenAIProvider(Provider):
         # token 用量：include_usage 让最终 chunk 携带（可能附在 finish chunk 或独立的空 choices chunk）
         usage_in = 0
         usage_out = 0
+        cache_hit: int | None = None  # 服务端缓存命中量（prompt_cache_hit_tokens，如 DeepSeek）
 
         for obj in objects:
             # 错误对象优先处理
@@ -172,6 +188,9 @@ class OpenAIProvider(Provider):
             if usage:
                 usage_in = int(usage.get("prompt_tokens") or 0)
                 usage_out = int(usage.get("completion_tokens") or 0)
+                if usage.get("prompt_cache_hit_tokens") is not None:
+                    cache_hit = int(usage["prompt_cache_hit_tokens"])
+                # prompt_cache_miss_tokens 不映射：归一化后无「未命中」展示需求
             choices = obj.get("choices") or []
             if not choices:
                 continue
@@ -192,8 +211,12 @@ class OpenAIProvider(Provider):
                 if function.get("arguments"):
                     slot["arguments"].append(function["arguments"])
             usage_info = (
-                UsageInfo(input_tokens=usage_in, output_tokens=usage_out)
-                if usage_in or usage_out
+                UsageInfo(
+                    input_tokens=usage_in,
+                    output_tokens=usage_out,
+                    cache_hit_tokens=cache_hit,
+                )
+                if usage_in or usage_out or cache_hit is not None
                 else None
             )
             if choice.get("finish_reason") == "tool_calls":
