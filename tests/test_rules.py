@@ -122,12 +122,47 @@ def test_load_from_invalid_structure_raises(tmp_path):
         rs.load_from([bad], tmp_path / "local.yaml")
 
 
-def test_load_from_unknown_tool_raises(tmp_path):
+def test_load_from_any_tool_name_ok(tmp_path):
+    """ch08 F8：任意工具名（含 MCP 工具名）都可加载，存在性交给 validate_tools。"""
     bad = tmp_path / "bad.yaml"
-    _write_rules(bad, Rule("no_such_tool", "x", Action.ALLOW))
+    _write_rules(bad, Rule("mcp_search", "*", Action.ALLOW))
+    rs = RuleSet()
+    rs.load_from([bad], tmp_path / "local.yaml")
+    assert rs.match("mcp_search", "") == [Action.ALLOW]
+
+
+def test_load_from_empty_tool_raises(tmp_path):
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        "rules:\n  - tool: ''\n    pattern: x\n    action: allow\n", encoding="utf-8"
+    )
     rs = RuleSet()
     with pytest.raises(ConfigError, match="tool 无效"):
         rs.load_from([bad], tmp_path / "local.yaml")
+
+
+def test_validate_tools_known_and_unknown(tmp_path):
+    """注册完成后统一校验：合法名通过，非法名报 ConfigError 并列出。"""
+    good = tmp_path / "good.yaml"
+    _write_rules(good, Rule("mcp_search", "*", Action.ALLOW))
+    rs = RuleSet()
+    rs.load_from([good], tmp_path / "local.yaml")
+    rs.validate_tools({"mcp_search"})  # 合法：不抛
+
+    bad = tmp_path / "bad.yaml"
+    _write_rules(bad, Rule("no_such_tool", "*", Action.ALLOW))
+    rs2 = RuleSet()
+    rs2.load_from([bad], tmp_path / "local.yaml")
+    with pytest.raises(ConfigError, match="no_such_tool"):
+        rs2.validate_tools({"mcp_search"})
+
+
+def test_validate_tools_ignores_session_rules(tmp_path):
+    """会话规则（add 构造）不参与校验。"""
+    rs = RuleSet()
+    rs.load_from([], tmp_path / "local.yaml")
+    rs.add(Rule("session_only_tool", "", Action.ALLOW))  # 会话规则：真实调用构造
+    rs.validate_tools(set())  # 不抛
 
 
 def test_load_from_invalid_action_raises(tmp_path):

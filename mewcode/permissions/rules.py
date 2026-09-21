@@ -1,11 +1,14 @@
 """规则引擎：Rule/RuleSet 数据结构、匹配与裁决、三 YAML 读写合并。
 
-规则形式「工具名(模式)」：tool 为六个工具名之一，pattern 为精确字符串
-或 glob（`*`/`?`，`**` 归一为 `*`、跨路径分隔符匹配）。裁决三种：
-allow / ask / deny；多条命中时 deny > ask > allow（与所在层级无关）。
+规则形式「工具名(模式)」：tool 为任意工具名（六个内置工具或 MCP
+工具），pattern 为精确字符串或 glob（`*`/`?`，`**` 归一为 `*`、
+跨路径分隔符匹配）。裁决三种：allow / ask / deny；多条命中时
+deny > ask > allow（与所在层级无关）。
 
 三个 YAML 文件（用户级/项目级/本地级）启动时合并读取，层级只决定
-写入位置：永久允许一律追加到本地级。
+写入位置：永久允许一律追加到本地级。文件规则的工具名在加载时只查
+格式（非空字符串），存在性由 validate_tools 在工具注册完成后统一
+校验（ch08 F8：MCP 工具名注册前未知）。
 """
 
 from __future__ import annotations
@@ -18,16 +21,6 @@ from pathlib import Path
 import yaml
 
 from mewcode.config import ConfigError
-
-# 六个核心工具名（规则校验白名单）
-TOOL_NAMES = {
-    "read_file",
-    "write_file",
-    "edit_file",
-    "run_command",
-    "find_files",
-    "grep_code",
-}
 
 
 class Action(Enum):
@@ -63,6 +56,7 @@ class RuleSet:
 
     def __init__(self) -> None:
         self._rules: list[Rule] = []
+        self._file_rules: list[Rule] = []  # 仅文件来源（validate_tools 校验对象）
         self._local_path: Path | None = None
 
     @property
@@ -124,10 +118,8 @@ class RuleSet:
             tool = item.get("tool")
             pattern = item.get("pattern")
             action = item.get("action")
-            if not isinstance(tool, str) or tool not in TOOL_NAMES:
-                raise ConfigError(
-                    f"权限规则文件 {path} 第 {i} 条 tool 无效: {tool!r}（可选: {sorted(TOOL_NAMES)}）"
-                )
+            if not isinstance(tool, str) or not tool:
+                raise ConfigError(f"权限规则文件 {path} 第 {i} 条 tool 无效: {tool!r}")
             if not isinstance(pattern, str) or not pattern:
                 raise ConfigError(f"权限规则文件 {path} 第 {i} 条 pattern 缺失")
             try:
@@ -143,7 +135,21 @@ class RuleSet:
         """读一个文件：缺失跳过，存在则解析校验并合并。"""
         if not path.is_file():
             return
-        self._rules.extend(self._parse_rule_file(path))
+        rules = self._parse_rule_file(path)
+        self._rules.extend(rules)
+        self._file_rules.extend(rules)
+
+    def validate_tools(self, known: set[str]) -> None:
+        """校验文件来源规则的工具名都在已知工具集合内。
+
+        会话规则（add 进来的）不参与——它们由真实调用构造，天然合法。
+        在 MCP 工具注册完成后调用（ch08 F8）。
+        """
+        invalid = sorted({r.tool for r in self._file_rules if r.tool not in known})
+        if invalid:
+            raise ConfigError(
+                "权限规则引用了未注册的工具: " + ", ".join(repr(t) for t in invalid)
+            )
 
     def append_to_local_file(self, rule: Rule) -> None:
         """把规则追加写进本地级 YAML（去重）；本地级缺失时新建。
