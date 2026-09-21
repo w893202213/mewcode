@@ -68,10 +68,15 @@ def _print_welcome(console: Console, config: ProviderConfig) -> None:
     )
 
 
-def run(provider: Provider, config: ProviderConfig, registry: ToolRegistry) -> None:
+def run(
+    provider: Provider,
+    config: ProviderConfig,
+    registry: ToolRegistry,
+    custom_instructions: str = "",
+) -> None:
     """TUI 主循环：读输入 → 命令或 Agent Loop → 回到输入。"""
     session = ChatSession()
-    agent = Agent(provider, registry, session)
+    agent = Agent(provider, registry, session, custom_instructions=custom_instructions)
 
     # 双击 Ctrl+C 判定：第一次提示（不清行），3 秒内第二次退出
     tracker = DoublePressTracker()
@@ -132,7 +137,7 @@ def _agent_round(console: Console, agent: Agent, text: str, tracker: DoublePress
     q = run_in_background(agent, text)
     # 助手回复前缀独立成行，事件流内容渲染在它下方
     console.print(_ASSISTANT_PREFIX)
-    usage: dict[str, int] = {"in": 0, "out": 0}
+    usage: dict[str, int | None] = {"in": 0, "out": 0, "cache_hit": None, "cache_write": None}
     end: RoundEnd | None = None
     try:
         end = _consume_events(console, q, usage)
@@ -145,27 +150,34 @@ def _agent_round(console: Console, agent: Agent, text: str, tracker: DoublePress
             end = None  # 用户再按 Ctrl+C：不再等待后台收尾
     if end is None:
         end = RoundEnd(RoundEndReason.CANCELLED, "已取消")
-    _print_end(console, usage["in"], usage["out"], end)
+    _print_end(console, usage, end)
 
 
-def _consume_events(console: Console, q: queue.Queue, usage: dict[str, int]) -> RoundEnd:
+def _consume_events(console: Console, q: queue.Queue, usage: dict[str, int | None]) -> RoundEnd:
     """消费事件队列直到 RoundEnd；返回结束事件。
 
-    每轮一个 Live（流式文本 + 第 N 轮进度 + 思考计时），工具调用与
-    结果在流结束后逐条打印（ch04 样式）。KeyboardInterrupt 向上传播
-    给 _agent_round 处理取消；finally 保证 Live 一定关闭。
+    每轮一个 Live（流式正文 + 思考计时），工具调用与结果在流结束后逐条
+    打印（ch04 样式）。帧高有上限（_max_live_lines）：帧高超出终端高度时
+    Rich 会把整帧滚进历史区（同一内容重复出现），因此「第 N 轮」行在轮初
+    一次性打印、已完结的 markdown 块一次性提交到滚动区，帧内只保留思考
+    行与当前未完结块。KeyboardInterrupt 向上传播给 _agent_round 处理取消；
+    finally 保证 Live 一定关闭。
     """
     live: Live | None = None
     indicator: ThinkingIndicator | None = None
     iteration = 0
     thinking = ""
     reply: list[str] = []
+    tail = ""  # 帧内显示的当前未完结块（源文本）
+    committed_blocks = 0  # 已一次性提交（打印）的 markdown 块数
+    committed_tail_lines = 0  # 当前块已按行提交过的开头行数（超高截断用）
+    max_lines = _max_live_lines(console)
 
     def render() -> None:
         if live is not None:
-            live.update(
-                _stream_renderable(thinking, "".join(reply), indicator, iteration)
-            )
+            # 思考文本同样受行数上限约束，避免长思考撑爆帧高
+            shown_thinking = "\n".join(thinking.splitlines()[-max_lines:])
+            live.update(_stream_renderable(shown_thinking, tail, indicator))
 
     def close_live() -> None:
         nonlocal live
@@ -180,12 +192,16 @@ def _consume_events(console: Console, q: queue.Queue, usage: dict[str, int]) -> 
             except queue.Empty:
                 continue
             if isinstance(event, ProgressEvent):
-                # 新一轮：关闭上一轮 Live（工具面板已打印），开新 Live
+                # 新一轮：关闭上一轮 Live（工具面板已打印），打印进度行，开新 Live
                 close_live()
                 iteration = event.iteration
                 thinking = ""
                 reply.clear()
+                tail = ""
+                committed_blocks = 0
+                committed_tail_lines = 0
                 indicator = ThinkingIndicator()
+                console.print(Text(f"第 {iteration} 轮", style=_TIMER_STYLE))
                 live = Live(
                     indicator,
                     console=console,
@@ -199,7 +215,46 @@ def _consume_events(console: Console, q: queue.Queue, usage: dict[str, int]) -> 
                 render()
             elif isinstance(event, TextDelta):
                 reply.append(event.text)
-                render()
+                if live is None:
+                    continue
+                blocks = _split_markdown_blocks("".join(reply))
+                if not blocks:
+                    continue
+                committed_text = ""
+                if len(blocks) - 1 > committed_blocks:
+                    # 已完结的块一次性提交到滚动区（不再重绘），帧内只保留当前块；
+                    # 若上一个块已按行提交过开头（超高截断），只补交其余部分
+                    pieces: list[str] = []
+                    for i, block in enumerate(blocks[committed_blocks:-1]):
+                        lines = block.splitlines()
+                        if i == 0 and committed_tail_lines:
+                            lines = lines[committed_tail_lines:]
+                        pieces.append("\n".join(lines))
+                    committed_text = "\n\n".join(pieces) + "\n\n"
+                    committed_blocks = len(blocks) - 1
+                    committed_tail_lines = 0
+                tail = blocks[-1]
+                tail_lines = tail.splitlines()
+                overflow = max(len(tail_lines) - max_lines, 0)
+                if overflow > committed_tail_lines:
+                    # 单个块超高（如大段代码围栏）：新增的超出行先提交，帧内保留末尾 max_lines 行
+                    committed_text += "\n".join(
+                        tail_lines[committed_tail_lines:overflow]
+                    )
+                    committed_tail_lines = overflow
+                tail = "\n".join(tail_lines[overflow:])
+                if overflow and tail_lines:
+                    # 围栏块被截断后，保留的尾部补一个围栏开头，否则中段会退化成段落
+                    opener = tail_lines[0].strip()
+                    if opener.startswith("```") or opener.startswith("~~~"):
+                        tail = tail_lines[0] + "\n" + tail
+                if committed_text:
+                    render()
+                    # 先同步帧内容再打印提交文本，提交块才会落在旧帧上方而非下方
+                    live.refresh()
+                    console.print(Markdown(committed_text))
+                else:
+                    render()
             elif isinstance(event, ToolCallStarted):
                 close_live()
                 _print_tool_call(console, event.call)
@@ -208,6 +263,8 @@ def _consume_events(console: Console, q: queue.Queue, usage: dict[str, int]) -> 
             elif isinstance(event, UsageEvent):
                 usage["in"] = event.input_tokens
                 usage["out"] = event.output_tokens
+                usage["cache_hit"] = event.cache_hit_tokens
+                usage["cache_write"] = event.cache_write_tokens
             elif isinstance(event, RoundEnd):
                 if live is not None:
                     if event.reason is RoundEndReason.ERROR:
@@ -220,7 +277,9 @@ def _consume_events(console: Console, q: queue.Queue, usage: dict[str, int]) -> 
         close_live()
 
 
-def _drain_cancelled(console: Console, q: queue.Queue, usage: dict[str, int]) -> RoundEnd | None:
+def _drain_cancelled(
+    console: Console, q: queue.Queue, usage: dict[str, int | None]
+) -> RoundEnd | None:
     """取消后继续消费队列直到 RoundEnd（渲染途中到达的工具面板），超时放弃。"""
     deadline = time.monotonic() + _CANCEL_DRAIN_TIMEOUT
     while time.monotonic() < deadline:
@@ -235,17 +294,24 @@ def _drain_cancelled(console: Console, q: queue.Queue, usage: dict[str, int]) ->
         elif isinstance(event, UsageEvent):
             usage["in"] = event.input_tokens
             usage["out"] = event.output_tokens
+            usage["cache_hit"] = event.cache_hit_tokens
+            usage["cache_write"] = event.cache_write_tokens
         elif isinstance(event, RoundEnd):
             return event
     return None
 
 
-def _print_end(console: Console, usage_in: int, usage_out: int, end: RoundEnd) -> None:
-    """轮次收尾：token 用量行 + 停止原因面板。"""
-    if usage_in or usage_out:
-        console.print(
-            Text(f"本轮 token: 输入 {usage_in} · 输出 {usage_out}", style=_TIMER_STYLE)
-        )
+def _print_end(console: Console, usage: dict[str, int | None], end: RoundEnd) -> None:
+    """轮次收尾：token 用量行（含缓存命中/写入，服务端返回才展示）+ 停止原因面板。"""
+    parts: list[str] = []
+    if usage.get("in") or usage.get("out"):
+        parts.append(f"输入 {usage['in']} · 输出 {usage['out']}")
+    if usage.get("cache_hit") is not None:
+        parts.append(f"缓存命中 {usage['cache_hit']}")
+    if usage.get("cache_write") is not None:
+        parts.append(f"缓存写入 {usage['cache_write']}")
+    if parts:
+        console.print(Text("本轮 token: " + " · ".join(parts), style=_TIMER_STYLE))
     if end.reason is RoundEndReason.ERROR:
         console.print(
             Panel(end.message or "请求失败", title="[bold red]请求失败[/bold red]", border_style="red")
@@ -312,13 +378,44 @@ class ThinkingIndicator:
         yield Text(f"thinking… {elapsed}s", style=_TIMER_STYLE)
 
 
+def _max_live_lines(console: Console) -> int:
+    """Live 重绘区的行数上限：终端高度留 2 行余量（至少 8 行）。
+
+    帧高超过终端高度时，Rich 的原地重绘会退化成整帧滚动，
+    每一帧都完整落进历史区，造成同一内容反复出现。
+    """
+    return max(8, (console.height or 24) - 2)
+
+
+def _split_markdown_blocks(text: str) -> list[str]:
+    """按空行把流式正文切成 markdown 块；代码围栏内的空行不切（围栏块整体提交）。"""
+    blocks: list[str] = []
+    cur: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+        if not stripped and not in_fence:
+            if cur:
+                blocks.append("\n".join(cur))
+                cur = []
+        else:
+            cur.append(line)
+    if cur:
+        blocks.append("\n".join(cur))
+    return blocks
+
+
 def _stream_renderable(
-    thinking: str, reply: str, indicator: ThinkingIndicator, iteration: int = 0
+    thinking: str, reply: str, indicator: ThinkingIndicator
 ) -> Group:
-    """组装 Live 渲染内容：第 N 轮 → 思考期灰色计时（有思考内容时并在下方）→ 流式正文。"""
+    """组装 Live 渲染内容：思考期灰色计时（有思考内容时并在下方）→ 流式正文（当前未完结块）。
+
+    「第 N 轮」进度行不在帧内：由 _consume_events 在轮初一次性打印，
+    避免帧随提交下移时把进度行带进正文中间。
+    """
     parts: list = []
-    if iteration:
-        parts.append(Text(f"第 {iteration} 轮", style=_TIMER_STYLE))
     if reply:
         parts.append(Markdown(reply))
     else:

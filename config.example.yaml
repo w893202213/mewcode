@@ -9,6 +9,14 @@
 #   base_url 请求地址（API 基础地址）
 #   api_key  认证密钥
 #   thinking 是否启用扩展思考（可选，缺省 false）
+#
+# 顶层可选字段：
+#   custom_instructions 自定义指令（多行文本，可选）——拼进系统提示的
+#   「自定义指令」模块，适合写全局偏好（回答语言、代码风格等）
+
+# custom_instructions: |
+#   回答用中文
+#   代码风格简洁
 
 providers:
   - name: claude

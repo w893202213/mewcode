@@ -89,3 +89,48 @@ def test_select_profile_not_found_lists_available(tmp_path):
     with pytest.raises(ConfigError) as exc:
         select_profile(configs, "nope")
     assert "claude" in str(exc.value) and "gpt" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# ch06: custom_instructions 读取
+# ---------------------------------------------------------------------------
+
+from mewcode.config import load_custom_instructions
+
+
+def test_custom_instructions_present(tmp_path):
+    """顶层 custom_instructions 多行文本原样读取（前后空白剔除）。"""
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "providers: []\ncustom_instructions: |\n  回答用中文\n  代码风格简洁\n",
+        encoding="utf-8",
+    )
+    # 注意：providers 空列表与 load_config 无关，本函数只读顶层字段
+    text = load_custom_instructions(str(path))
+    assert text == "回答用中文\n代码风格简洁"
+
+
+def test_custom_instructions_absent_returns_empty(tmp_path):
+    """字段缺失返回空串（该模块不参与拼装）。"""
+    path = _write(tmp_path, [FULL])
+    assert load_custom_instructions(path) == ""
+
+
+def test_custom_instructions_non_string_returns_empty(tmp_path):
+    """字段非字符串（如数字/列表）返回空串，不抛异常。"""
+    path = tmp_path / "config.yaml"
+    path.write_text("providers: []\ncustom_instructions: 123\n", encoding="utf-8")
+    assert load_custom_instructions(str(path)) == ""
+
+
+def test_custom_instructions_missing_file_returns_empty(tmp_path):
+    """文件缺失返回空串（存在性校验由 load_config 负责）。"""
+    assert load_custom_instructions(str(tmp_path / "nope.yaml")) == ""
+
+
+def test_custom_instructions_bad_yaml_raises(tmp_path):
+    """文件损坏抛 ConfigError（与 load_config 口径一致）。"""
+    path = tmp_path / "bad.yaml"
+    path.write_text("providers: [unclosed", encoding="utf-8")
+    with pytest.raises(ConfigError, match="格式错误"):
+        load_custom_instructions(str(path))

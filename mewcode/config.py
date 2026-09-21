@@ -99,3 +99,23 @@ def select_profile(configs: list[ProviderConfig], name: str | None = None) -> Pr
             return config
     available = ", ".join(c.name for c in configs)
     raise ConfigError(f"找不到名为 {name!r} 的配置，可用配置: {available}")
+
+
+def load_custom_instructions(path: str | os.PathLike) -> str:
+    """读取 YAML 顶层可选字段 custom_instructions（多行文本），拼进系统提示的
+    「自定义指令」模块。
+
+    文件缺失、字段缺失或字段非字符串一律返回空串（该模块不参与拼装）；
+    文件本身损坏抛 ConfigError（与 load_config 的校验口径一致）。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except FileNotFoundError:
+        return ""
+    except yaml.YAMLError as e:
+        raise ConfigError(f"配置文件格式错误: {e}")
+    if not isinstance(data, dict):
+        return ""
+    value = data.get("custom_instructions", "")
+    return value.strip() if isinstance(value, str) else ""

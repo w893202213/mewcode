@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from mewcode.config import ConfigError, load_config, select_profile
+from mewcode.config import ConfigError, load_config, load_custom_instructions, select_profile
 from mewcode.provider import create_provider
 from mewcode.tools import create_registry
 from mewcode.tui.app import run
@@ -46,4 +46,5 @@ def main(argv: list[str] | None = None) -> None:
 
     provider = create_provider(config)
     registry = create_registry()
-    run(provider, config, registry)
+    custom_instructions = load_custom_instructions(args.config)
+    run(provider, config, registry, custom_instructions)
