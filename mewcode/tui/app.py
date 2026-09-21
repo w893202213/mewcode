@@ -134,10 +134,12 @@ def run(
                 if result is CommandResult.EXIT:
                     return
                 continue
-            _agent_round(console, agent, text, tracker)
+            _agent_round(console, agent, text, tracker, gate)
 
 
-def _agent_round(console: Console, agent: Agent, text: str, tracker: DoublePressTracker) -> None:
+def _agent_round(
+    console: Console, agent: Agent, text: str, tracker: DoublePressTracker, gate: PermissionGate
+) -> None:
     """一轮 Agent Loop：后台跑 Agent，主线程消费事件渲染（F9）。
 
     用户消息不回显：prompt_toolkit 输入行已留在终端滚动区，问题天然可见。
