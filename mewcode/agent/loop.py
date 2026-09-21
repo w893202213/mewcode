@@ -8,6 +8,8 @@ Agent 只产出事件（agent/events.py），完全不感知界面。provider �
 from __future__ import annotations
 
 import asyncio
+import os
+import platform
 import threading
 from collections.abc import AsyncIterator
 
@@ -26,9 +28,16 @@ from mewcode.provider.base import (
     Provider,
     ProviderError,
     StreamEvent,
+    SystemPrompt,
     TextDelta,
     ThinkingDelta,
     ToolCall,
+)
+from mewcode.prompt import (
+    PLAN_MODE_DIRECTIVE,
+    Environment,
+    SwitchDirective,
+    SystemPromptBuilder,
 )
 from mewcode.session import ChatSession, ToolResultRecord, ToolUse
 from mewcode.tools.base import Tool, ToolError, ToolResult
@@ -39,12 +48,16 @@ MAX_ITERATIONS = 30
 # 连续调用未知工具达到该次数即停止（spec F2④）
 UNKNOWN_TOOL_LIMIT = 2
 
-# Plan Mode 切换时注入会话的提示（以 user 消息形式，两家协议通用）
-PLAN_MODE_ON_MESSAGE = "（Plan Mode 已开启：只能使用只读工具调研，请给出计划，不要修改文件或执行命令。）"
-PLAN_MODE_OFF_MESSAGE = "（Plan Mode 已关闭：已切回执行模式，可以按计划动手了。）"
-
 # 泵线程 → 消费者的一次等待轮询间隔（秒）：取消检查的最长延迟
 _CANCEL_POLL_INTERVAL = 0.05
+
+
+def _safe_cwd() -> str:
+    """启动目录采样：极端情况失败时用占位符，不让补充块拖垮启动。"""
+    try:
+        return os.getcwd()
+    except OSError:
+        return "未知"
 
 
 class _Cancelled(Exception):
@@ -78,12 +91,13 @@ def _pump_provider(
     provider: Provider,
     messages: list,
     tools: list[Tool],
+    system: SystemPrompt,
     aq: asyncio.Queue,
     loop: asyncio.AbstractEventLoop,
 ) -> None:
     """泵线程：跑同步 provider.stream()，事件跨线程灌入 asyncio 队列。"""
     try:
-        for event in provider.stream(messages, tools):
+        for event in provider.stream(messages, tools, system):
             if not _push(aq, loop, event):
                 return  # 消费者已放弃（如取消后事件循环关闭）
     except Exception as e:  # 含 ProviderError：包装后交给消费者抛出
@@ -101,6 +115,7 @@ class Agent:
         registry: ToolRegistry,
         session: ChatSession,
         max_iterations: int = MAX_ITERATIONS,
+        custom_instructions: str = "",
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -108,22 +123,24 @@ class Agent:
         self._max_iterations = max_iterations
         self._plan_mode = False
         self._cancelled = threading.Event()
+        # 系统提示拼装器：环境快照（启动目录+平台）构造时采样，日期每次 build 现取；
+        # 自定义指令来自配置（可选）
+        self._builder = SystemPromptBuilder(
+            Environment(cwd=_safe_cwd(), platform=platform.platform()),
+            custom_instructions=custom_instructions,
+        )
 
     def cancel(self) -> None:
         """线程安全：请求停止循环（进行中轮次丢弃，已落盘轮次保留）。"""
         self._cancelled.set()
 
     def enter_plan_mode(self) -> None:
-        """进入计划模式：置标志并注入提示 user 消息（幂等）。"""
-        if not self._plan_mode:
-            self._plan_mode = True
-            self._session.add_user(PLAN_MODE_ON_MESSAGE)
+        """进入计划模式：只置标志（幂等）；指令由每轮系统补充块注入，不写会话。"""
+        self._plan_mode = True
 
     def exit_plan_mode(self) -> None:
-        """退出计划模式：清标志并注入提示 user 消息（幂等）。"""
-        if self._plan_mode:
-            self._plan_mode = False
-            self._session.add_user(PLAN_MODE_OFF_MESSAGE)
+        """退出计划模式：只清标志（幂等）。"""
+        self._plan_mode = False
 
     @property
     def plan_mode(self) -> bool:
@@ -156,7 +173,7 @@ class Agent:
         return self._cancelled.is_set()
 
     async def _stream_bridged(
-        self, messages: list, tools: list[Tool]
+        self, messages: list, tools: list[Tool], system: SystemPrompt
     ) -> AsyncIterator[StreamEvent]:
         """把同步 provider 流转成可取消的异步流（泵线程 + call_soon_threadsafe）。
 
@@ -167,7 +184,7 @@ class Agent:
         loop = asyncio.get_running_loop()
         thread = threading.Thread(
             target=_pump_provider,
-            args=(self._provider, messages, tools, aq, loop),
+            args=(self._provider, messages, tools, system, aq, loop),
             daemon=True,
             name="provider-pump",
         )
@@ -196,16 +213,24 @@ class Agent:
         self._session.add_user(user_text)
         total_in = 0
         total_out = 0
+        total_cache_hit: int | None = None  # 本轮累计缓存命中（服务端不返回则 None）
+        total_cache_write: int | None = None  # 本轮累计缓存写入
         unknown_streak = 0  # 连续未知工具计数（本轮内跨迭代累计）
         try:
             for iteration in range(1, self._max_iterations + 1):
                 yield ProgressEvent(iteration)
                 if self._cancelled_now():
                     raise _Cancelled()
+                # 每轮组装系统提示：stable 逐字节不变（缓存命中），
+                # dynamic 随开关指令与轮次变化（注入节奏见 SwitchDirective）
+                directives: list[SwitchDirective] = (
+                    [PLAN_MODE_DIRECTIVE] if self._plan_mode else []
+                )
+                system = self._builder.build(directives, iteration)
                 collector = StreamCollector()
                 calls: list[ToolCall] = []
                 async for event in self._stream_bridged(
-                    self._session.messages, self._visible_tools()
+                    self._session.messages, self._visible_tools(), system
                 ):
                     if self._cancelled_now():
                         raise _Cancelled()
@@ -222,6 +247,14 @@ class Agent:
                         if event.usage:
                             total_in += event.usage.input_tokens
                             total_out += event.usage.output_tokens
+                            if event.usage.cache_hit_tokens is not None:
+                                total_cache_hit = (
+                                    (total_cache_hit or 0) + event.usage.cache_hit_tokens
+                                )
+                            if event.usage.cache_write_tokens is not None:
+                                total_cache_write = (
+                                    (total_cache_write or 0) + event.usage.cache_write_tokens
+                                )
                 # 流结束后立刻检查：取消时不落盘本轮部分响应
                 if self._cancelled_now():
                     raise _Cancelled()
@@ -233,7 +266,12 @@ class Agent:
                         ToolUse(id=c.id, name=c.name, args=c.args) for c in calls
                     ],
                 )
-                yield UsageEvent(input_tokens=total_in, output_tokens=total_out)
+                yield UsageEvent(
+                    input_tokens=total_in,
+                    output_tokens=total_out,
+                    cache_hit_tokens=total_cache_hit,
+                    cache_write_tokens=total_cache_write,
+                )
                 if not calls:
                     # 停止条件①：模型不再请求工具，正常结束
                     yield RoundEnd(RoundEndReason.OK)

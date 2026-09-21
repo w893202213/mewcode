@@ -21,14 +21,19 @@ from mewcode.tools import create_registry
 
 
 class FakeProvider:
-    """脚本化假 Provider：handler(第几次调用, messages, tools) → 事件列表。"""
+    """脚本化假 Provider：handler(第几次调用, messages, tools) → 事件列表。
+
+    system 单独记录在 systems 里，供断言每轮注入的系统提示内容。
+    """
 
     def __init__(self, handler):
         self._handler = handler
         self.calls = 0
+        self.systems = []
 
-    def stream(self, messages, tools):
+    def stream(self, messages, tools, system):
         self.calls += 1
+        self.systems.append(system)
         return iter(self._handler(self.calls, messages, tools))
 
 
@@ -129,6 +134,51 @@ def test_usage_accumulates_across_rounds():
     events = _collect(Agent(FakeProvider(handler), create_registry(), session), "查")
     usages = [e for e in events if isinstance(e, UsageEvent)]
     assert [(u.input_tokens, u.output_tokens) for u in usages] == [(10, 5), (30, 13)]
+    # 服务端不返回缓存字段：事件里为 None（优雅降级）
+    assert usages[0].cache_hit_tokens is None and usages[0].cache_write_tokens is None
+
+
+def test_cache_usage_accumulates_across_rounds():
+    """缓存命中/写入随轮次累计进 UsageEvent（F6）。"""
+    session = ChatSession()
+
+    def handler(n, messages, tools):
+        if n == 1:
+            return [
+                ToolCall(id="t1", name="grep_code", args={"pattern": "x"}),
+                Done(usage=UsageInfo(10, 5, cache_hit_tokens=0, cache_write_tokens=90)),
+            ]
+        return [PTextDelta("完"), Done(usage=UsageInfo(20, 8, cache_hit_tokens=90))]
+
+    events = _collect(Agent(FakeProvider(handler), create_registry(), session), "查")
+    usages = [e for e in events if isinstance(e, UsageEvent)]
+    assert usages[0].cache_hit_tokens == 0
+    assert usages[0].cache_write_tokens == 90
+    assert usages[1].cache_hit_tokens == 90
+    assert usages[1].cache_write_tokens == 90  # 第二轮无写入，累计值不变
+
+
+def test_system_prompt_sent_every_round():
+    """每轮请求都携带系统提示：stable 含七模块、dynamic 含环境信息（F1/F3）。"""
+    session = ChatSession()
+
+    def handler(n, messages, tools):
+        if n == 1:
+            return [ToolCall(id="t1", name="grep_code", args={"pattern": "x"}), Done()]
+        return [PTextDelta("完"), Done()]
+
+    provider = FakeProvider(handler)
+    _collect(Agent(provider, create_registry(), session), "查")
+    assert len(provider.systems) == 2
+    # 两轮 stable 逐字节一致（缓存前缀不变）
+    assert provider.systems[0].stable == provider.systems[1].stable
+    assert "## 身份" in provider.systems[0].stable
+    assert "## 文本输出" in provider.systems[0].stable
+    # dynamic：环境信息补充块（工作目录/操作系统/当前日期）
+    assert "<supplement>" in provider.systems[0].dynamic
+    assert "【环境信息】" in provider.systems[0].dynamic
+    assert "工作目录" in provider.systems[0].dynamic
+    assert "当前日期" in provider.systems[0].dynamic
 
 
 def test_provider_error_rolls_back_round():

@@ -31,10 +31,15 @@ class ToolResultEvent:
 
 @dataclass
 class UsageEvent:
-    """本轮循环截至当前的累计 token 用量（每次 LLM 调用后发射，TUI 展示）。"""
+    """本轮循环截至当前的累计 token 用量（每次 LLM 调用后发射，TUI 展示）。
+
+    缓存字段为累计值：服务端不返回时为 None，TUI 据此优雅降级不展示。
+    """
 
     input_tokens: int
     output_tokens: int
+    cache_hit_tokens: int | None = None  # 本轮累计缓存命中（从缓存读取的量）
+    cache_write_tokens: int | None = None  # 本轮累计缓存写入（写入缓存的量）
 
 
 @dataclass
