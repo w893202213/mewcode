@@ -44,10 +44,33 @@ class ToolCall:
 
 @dataclass
 class UsageInfo:
-    """一次 LLM 调用的 token 用量（各家协议解析后归一化）。"""
+    """一次 LLM 调用的 token 用量（各家协议解析后归一化）。
+
+    缓存字段归一化：cache_hit_tokens = 从缓存读取的量（Anthropic 的
+    cache_read / OpenAI 兼容服务的 prompt_cache_hit），cache_write_tokens
+    = 本次写入缓存的量（Anthropic 的 cache_creation）。服务端不返回时
+    为 None，展示层据此优雅降级。
+    """
 
     input_tokens: int
     output_tokens: int
+    cache_hit_tokens: int | None = None
+    cache_write_tokens: int | None = None
+
+
+@dataclass
+class SystemPrompt:
+    """一次请求的系统提示：stable 进入可缓存前缀，dynamic 紧随其后、不缓存。
+
+    两家协议各自映射：
+    - Anthropic：system 块列表——stable 块末尾加缓存断点，dynamic 作为
+      断点后的补充块（无断点，每轮变化不打断缓存前缀）
+    - OpenAI：system 角色消息——stable 排在最前（依赖服务端自动前缀
+      缓存），dynamic 拼接其后
+    """
+
+    stable: str  # 七个固定模块文本（每轮逐字节一致）
+    dynamic: str  # <supplement>补充块 + 自定义指令块（都无则空串）
 
 
 @dataclass
@@ -76,6 +99,12 @@ class Provider(ABC):
     """
 
     @abstractmethod
-    def stream(self, messages: list[Message], tools: list[Tool]) -> Iterator[StreamEvent]:
-        """把对话历史与工具列表发给 LLM，逐个产出归一化流事件；失败抛 ProviderError。"""
+    def stream(
+        self, messages: list[Message], tools: list[Tool], system: SystemPrompt
+    ) -> Iterator[StreamEvent]:
+        """把对话历史、工具列表与系统提示发给 LLM，逐个产出归一化流事件；失败抛 ProviderError。
+
+        system.stable 必须落在可缓存前缀上（协议允许时加缓存断点），
+        system.dynamic 紧随其后且绝不携带缓存断点。
+        """
         ...
