@@ -119,3 +119,32 @@ def load_custom_instructions(path: str | os.PathLike) -> str:
         return ""
     value = data.get("custom_instructions", "")
     return value.strip() if isinstance(value, str) else ""
+
+
+def load_permission_mode(path: str | os.PathLike) -> "Mode":
+    """读取 YAML 顶层可选字段 permission_mode，决定启动时的权限档位。
+
+    缺失 → Mode.DEFAULT；值非法 → ConfigError（fail-closed 口径）。
+    函数内惰性导入 Mode：config 层避免与 permissions 包的模块级循环依赖
+    （permissions.rules 反向引用本模块的 ConfigError）。
+    """
+    from mewcode.permissions.gate import Mode
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except FileNotFoundError:
+        return Mode.DEFAULT
+    except yaml.YAMLError as e:
+        raise ConfigError(f"配置文件格式错误: {e}")
+    if not isinstance(data, dict):
+        return Mode.DEFAULT
+    value = data.get("permission_mode")
+    if value is None:
+        return Mode.DEFAULT
+    try:
+        return Mode(str(value).strip().lower())
+    except ValueError:
+        raise ConfigError(
+            f"permission_mode 不支持: {value!r}（可选: strict, default, accept）"
+        ) from None

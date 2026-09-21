@@ -230,7 +230,9 @@ def test_thinking_forwarded_and_collected():
 # ---------------------------------------------------------------------------
 
 import threading
+from pathlib import Path
 
+from mewcode.permissions import Mode, PermissionGate, RuleSet
 from mewcode.tools.base import Tool, ToolResult
 from mewcode.tools.registry import ToolRegistry
 
@@ -284,7 +286,9 @@ def test_batch_concurrent_readonly_serial_side_effect():
             ]
         return [PTextDelta("完成"), Done()]
 
-    events = _collect(Agent(FakeProvider(handler), registry, session), "批量执行")
+    # 放行档闸门：等价 ch05 直接执行语义（ch07 权限询问由 test_permission_loop 覆盖）
+    gate = PermissionGate(Path.cwd().resolve(), RuleSet(), Mode.ACCEPT)
+    events = _collect(Agent(FakeProvider(handler), registry, session, gate=gate), "批量执行")
     # 结果事件顺序 = 模型原始调用顺序（N7）
     results = [e for e in events if isinstance(e, ToolResultEvent)]
     assert [e.call.id for e in results] == ["t1", "t2", "t3"]

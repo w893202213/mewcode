@@ -12,9 +12,11 @@ import os
 import platform
 import threading
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 from mewcode.agent.collector import StreamCollector
 from mewcode.agent.events import (
+    PermissionAskEvent,
     ProgressEvent,
     RoundEnd,
     RoundEndReason,
@@ -33,6 +35,7 @@ from mewcode.provider.base import (
     ThinkingDelta,
     ToolCall,
 )
+from mewcode.permissions import Action, Mode, PermissionGate, RuleSet
 from mewcode.prompt import (
     PLAN_MODE_DIRECTIVE,
     Environment,
@@ -116,6 +119,7 @@ class Agent:
         session: ChatSession,
         max_iterations: int = MAX_ITERATIONS,
         custom_instructions: str = "",
+        gate: PermissionGate | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -123,6 +127,15 @@ class Agent:
         self._max_iterations = max_iterations
         self._plan_mode = False
         self._cancelled = threading.Event()
+        # 权限闸门：缺省建默认闸门（项目根=cwd、默认档、空规则）；
+        # 测试与 TUI 显式传入带规则/档位的闸门
+        self._gate = (
+            gate
+            if gate is not None
+            else PermissionGate(Path.cwd().resolve(), RuleSet(), Mode.DEFAULT)
+        )
+        # 挂起的权限询问 (future, 事件循环)；无询问时为 None
+        self._pending: tuple[asyncio.Future, asyncio.AbstractEventLoop] | None = None
         # 系统提示拼装器：环境快照（启动目录+平台）构造时采样，日期每次 build 现取；
         # 自定义指令来自配置（可选）
         self._builder = SystemPromptBuilder(
@@ -131,8 +144,57 @@ class Agent:
         )
 
     def cancel(self) -> None:
-        """线程安全：请求停止循环（进行中轮次丢弃，已落盘轮次保留）。"""
+        """线程安全：请求停止循环；同时解除挂起的权限询问（置拒绝）。
+
+        进行中轮次丢弃，已落盘轮次保留。
+        """
         self._cancelled.set()
+        pending = self._pending
+        if pending is not None:
+            fut, loop = pending
+            try:
+                loop.call_soon_threadsafe(fut.set_result, False)
+            except RuntimeError:
+                pass  # 事件循环已关闭：等待自然结束
+
+    @property
+    def permission_mode(self) -> Mode:
+        """当前权限档位（ch07 F4）。"""
+        return self._gate.mode
+
+    def cycle_permission_mode(self) -> Mode:
+        """循环切换权限档位并返回新档位（strict→default→accept→strict）。"""
+        return self._gate.cycle_mode()
+
+    def answer_permission(self, allow: bool) -> None:
+        """线程安全：回答挂起的权限询问（TUI 主线程调用）。
+
+        无挂起询问时静默忽略（取消/结束后的竞态应答）。
+        """
+        pending = self._pending
+        if pending is None:
+            return
+        fut, loop = pending
+        try:
+            loop.call_soon_threadsafe(fut.set_result, allow)
+        except RuntimeError:
+            pass  # 事件循环已关闭：应答无意义
+
+    async def _await_answer(self, fut: asyncio.Future) -> bool:
+        """等待应答 future；期间轮询取消标志（取消即抛 _Cancelled）。
+
+        调用方须在发出 PermissionAskEvent 前把 (fut, loop) 登记到
+        self._pending——TUI 收到事件即可立刻应答，无竞态窗口。
+        """
+        try:
+            while True:
+                done, _ = await asyncio.wait({fut}, timeout=_CANCEL_POLL_INTERVAL)
+                if self._cancelled_now():
+                    raise _Cancelled()
+                if done:
+                    return bool(fut.result())
+        finally:
+            self._pending = None
 
     def enter_plan_mode(self) -> None:
         """进入计划模式：只置标志（幂等）；指令由每轮系统补充块注入，不写会话。"""
@@ -209,6 +271,7 @@ class Agent:
         直到模型不再调工具或触发停止条件。异常路径回滚本轮（start_index 起）。
         """
         self._cancelled.clear()
+        self._pending = None
         start_index = len(self._session.messages)
         self._session.add_user(user_text)
         total_in = 0
@@ -276,13 +339,49 @@ class Agent:
                     # 停止条件①：模型不再请求工具，正常结束
                     yield RoundEnd(RoundEndReason.OK)
                     return
-                # 分批执行（F5）：只读工具并发、副作用工具按序串行
-                # 分组基于调用在模型响应中的顺序（dataclass 相等判断对重复调用不可靠）
-                readonly_flags = [self._is_read_only(c) for c in calls]
-                readonly = [c for c, f in zip(calls, readonly_flags) if f]
-                side_effect = [c for c, f in zip(calls, readonly_flags) if not f]
-                for call in readonly:
+                # 执行阶段（ch05 F5 + ch07 F7）：逐调用预检直通——
+                # 计划模式过滤沿用 → 闸门裁决；ALLOW 进执行队列、
+                # DENY 立即失败结果、ASK 挂起等应答；事件与回灌按模型
+                # 原始调用顺序（分组基于顺序：dataclass 相等判断对重复调用不可靠）
+                results: dict[int, ToolResult] = {}
+                planned: list[ToolCall] = []
+                for call in calls:
                     yield ToolCallStarted(call)
+                    if self._plan_mode and not self._is_read_only(call):
+                        # 计划模式只放开读类工具：副作用工具不执行，回灌失败结果（F7）
+                        results[id(call)] = ToolResult.failure(
+                            "计划模式已禁用该工具（仅只读工具可用，输入 /do 切回执行模式）"
+                        )
+                        continue
+                    try:
+                        tool = self._registry.get(call.name)
+                    except ToolError:
+                        planned.append(call)  # 未知工具无闸门可查，交给 execute_call 报错
+                        continue
+                    verdict = self._gate.check(tool, call)
+                    if verdict.action is Action.DENY:
+                        results[id(call)] = ToolResult.failure(verdict.reason)
+                        continue
+                    if verdict.action is Action.ASK:
+                        # 先登记 pending 再发事件：TUI 收到事件即可立刻应答
+                        loop = asyncio.get_running_loop()
+                        fut: asyncio.Future = loop.create_future()
+                        self._pending = (fut, loop)
+                        yield PermissionAskEvent(call, verdict.reason)
+                        if await self._await_answer(fut):
+                            planned.append(call)
+                        else:
+                            results[id(call)] = ToolResult.failure(
+                                "用户拒绝了该工具的权限请求"
+                            )
+                        continue
+                    planned.append(call)
+                    if self._cancelled_now():
+                        raise _Cancelled()
+                # 执行通过预检的调用：只读并发、副作用串行（ch05 F5）
+                readonly_flags = [self._is_read_only(c) for c in planned]
+                readonly = [c for c, f in zip(planned, readonly_flags) if f]
+                side_effect = [c for c, f in zip(planned, readonly_flags) if not f]
                 ro_results = await asyncio.gather(
                     *(
                         asyncio.to_thread(execute_call, self._registry, c)
@@ -292,28 +391,16 @@ class Agent:
                 if self._cancelled_now():
                     raise _Cancelled()
                 side_results: list = []
-                if self._plan_mode:
-                    # 计划模式只放开读类工具：副作用工具不执行，回灌失败结果（F7）
-                    for call in side_effect:
-                        yield ToolCallStarted(call)
-                        side_results.append(
-                            ToolResult.failure(
-                                "计划模式已禁用该工具（仅只读工具可用，输入 /do 切回执行模式）"
-                            )
-                        )
-                else:
-                    for call in side_effect:
-                        yield ToolCallStarted(call)
-                        side_results.append(
-                            await asyncio.to_thread(execute_call, self._registry, call)
-                        )
-                        if self._cancelled_now():
-                            raise _Cancelled()
+                for call in side_effect:
+                    side_results.append(
+                        await asyncio.to_thread(execute_call, self._registry, call)
+                    )
+                    if self._cancelled_now():
+                        raise _Cancelled()
                 # 执行完、回灌前再查取消：取消则丢弃本轮结果，不写会话
                 if self._cancelled_now():
                     raise _Cancelled()
                 # 按模型原始调用顺序统一回灌 + 发结果事件（N7）
-                results: dict[int, ToolResult] = {}
                 for call, result in zip(readonly, ro_results):
                     results[id(call)] = result
                 for call, result in zip(side_effect, side_results):

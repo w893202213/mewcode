@@ -30,6 +30,18 @@ class ToolResultEvent:
 
 
 @dataclass
+class PermissionAskEvent:
+    """一个工具调用触发询问（ch07 人在回路）：Agent 挂起等待应答。
+
+    TUI 展示询问面板并在用户作答后调用 Agent.answer_permission()；
+    reason 说明触发询问的原因（ask 规则或默认档询问）。
+    """
+
+    call: ToolCall
+    reason: str
+
+
+@dataclass
 class UsageEvent:
     """本轮循环截至当前的累计 token 用量（每次 LLM 调用后发射，TUI 展示）。
 
@@ -73,6 +85,7 @@ AgentEvent = (
     | ThinkingDelta
     | ToolCallStarted
     | ToolResultEvent
+    | PermissionAskEvent
     | UsageEvent
     | ProgressEvent
     | RoundEnd

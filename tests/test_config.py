@@ -3,7 +3,13 @@
 import pytest
 import yaml
 
-from mewcode.config import ConfigError, ProviderConfig, load_config, select_profile
+from mewcode.config import (
+    ConfigError,
+    ProviderConfig,
+    load_config,
+    load_permission_mode,
+    select_profile,
+)
 
 
 def _write(tmp_path, providers: list[dict]) -> str:
@@ -134,3 +140,42 @@ def test_custom_instructions_bad_yaml_raises(tmp_path):
     path.write_text("providers: [unclosed", encoding="utf-8")
     with pytest.raises(ConfigError, match="格式错误"):
         load_custom_instructions(str(path))
+
+
+# ---------------------------------------------------------------------------
+# permission_mode（ch07 T6）
+# ---------------------------------------------------------------------------
+
+
+def test_permission_mode_missing_returns_default(tmp_path):
+    from mewcode.permissions import Mode
+
+    path = tmp_path / "config.yaml"
+    path.write_text("providers: []\n", encoding="utf-8")
+    assert load_permission_mode(str(path)) is Mode.DEFAULT
+
+
+def test_permission_mode_missing_file_returns_default(tmp_path):
+    from mewcode.permissions import Mode
+
+    assert load_permission_mode(str(tmp_path / "nope.yaml")) is Mode.DEFAULT
+
+
+def test_permission_mode_three_values(tmp_path):
+    from mewcode.permissions import Mode
+
+    for value, expected in [
+        ("strict", Mode.STRICT),
+        ("default", Mode.DEFAULT),
+        ("accept", Mode.ACCEPT),
+    ]:
+        path = tmp_path / f"{value}.yaml"
+        path.write_text(f"providers: []\npermission_mode: {value}\n", encoding="utf-8")
+        assert load_permission_mode(str(path)) is expected
+
+
+def test_permission_mode_invalid_raises(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("providers: []\npermission_mode: superman\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="permission_mode"):
+        load_permission_mode(str(path))
