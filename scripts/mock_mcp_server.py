@@ -54,6 +54,19 @@ TOOLS = [
 SERVER_INFO = {"name": "mock-mcp-server", "version": "1.0.0"}
 SUPPORTED_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18"]
 
+# MOCK_EXTRA_TOOL=1 时额外暴露 upper 工具（多 Server 重名测试用）
+_EXTRA_TOOLS = [
+    {
+        "name": "upper",
+        "description": "把输入文本转为大写",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+    },
+]
+
 
 def _send(message: dict) -> None:
     """按 MCP stdio 规范输出单行 JSON 并 flush。"""
@@ -84,19 +97,20 @@ def _handle_initialize(msg: dict) -> None:
 
 
 def _handle_tools_list(msg: dict) -> None:
+    all_tools = TOOLS + (_EXTRA_TOOLS if os.environ.get("MOCK_EXTRA_TOOL") else [])
     # MOCK_PAGE_SIZE 存在时分页返回，供游标翻页测试
     page_size = os.environ.get("MOCK_PAGE_SIZE")
     if page_size:
         size = int(page_size)
         cursor = msg.get("params", {}).get("cursor")
         start = int(cursor) if cursor else 0
-        page = TOOLS[start : start + size]
+        page = all_tools[start : start + size]
         result: dict = {"tools": page}
-        if start + size < len(TOOLS):
+        if start + size < len(all_tools):
             result["nextCursor"] = str(start + size)
         _send_response(msg["id"], result)
         return
-    _send_response(msg["id"], {"tools": TOOLS})
+    _send_response(msg["id"], {"tools": all_tools})
 
 
 def _handle_tools_call(msg: dict) -> None:
@@ -121,6 +135,11 @@ def _handle_tools_call(msg: dict) -> None:
         _send_response(
             msg["id"],
             {"content": [{"type": "text", "text": "mock 故意失败"}], "isError": True},
+        )
+    elif name == "upper":
+        _send_response(
+            msg["id"],
+            {"content": [{"type": "text", "text": str(args.get("text", "")).upper()}]},
         )
     else:
         _send_error(msg["id"], -32602, f"未知工具: {name}")
