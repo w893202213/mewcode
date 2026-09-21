@@ -23,11 +23,12 @@
 - [x] MCP 工具走权限闸门：read_only=False 默认模式询问、严格拒绝、放行放行（验证：e2e 场景 1/HTTP 场景均弹出「需要权限确认」面板；闸门层序单测覆盖三档兜底）（AC8）
 - [x] 规则 `tool: mcp_tool_name, pattern: "*"` 命中后免询问放行（验证：e2e 场景 4 全程 0 次询问面板，工具直接执行并回灌）（AC9）
 - [x] cli 装配链完整：providers → 闸门 → 内置工具 → MCP 发现 → validate_tools → run → finally shutdown（验证：`python -m compileall mewcode/ scripts/` 通过；`python -m mewcode --help` 正常；无 MCP 配置启动行为与 ch07 一致——基线测试全绿）
+- [x] 真实 Server 联调修复（context7 官方 Streamable HTTP）：HttpTransport 按规范接受 notification 的 202 Accepted 应答（此前误判为连接失败，握手在 notifications/initialized 步失败导致 Server 被跳过）（验证：新增 `tests/test_mcp_transports.py` test_http_202_notification_accepted；真实 context7 发现注册出 resolve-library-id/query-docs 两工具）
 
 ## 编译与测试
 
 - [x] 项目编译无错误（验证：`python -m compileall mewcode/ scripts/` 退出码 0）
-- [x] 全部单元测试通过（验证：`pytest tests/ -q` 320 passed，退出码 0）
+- [x] 全部单元测试通过（验证：`pytest tests/ -q` 321 passed，退出码 0；较基线 320 新增 1 例 202 用例）
 - [x] 既有回归无损：六个内置工具、Agent Loop、权限五层、TUI、配置解析全部既有测试通过（验证：全量 320 = 基线 243 + 本章新增 77，无既有用例失败）
 
 ## 端到端场景（tmux）
@@ -38,3 +39,4 @@
 - [x] 场景 4（规则放行）：规则文件写 `add(*) → allow` → 调 add 全程 0 次「需要权限确认」面板，直接执行并回灌（AC9）
 - [x] 场景 5（退出无残留）：退出 MewCode 后 ps 检查 mock_mcp_server 子进程残留数为 0（AC10）
 - [x] 场景 6（HTTP 全链路，AC2）：stdio mock 经临时桥接脚本包装成 Streamable HTTP（SSE 形态）→ 配置 `url + headers（${MCP_TOKEN} 展开）` → 启动无警告 → Agent 调用 add → 确认 → 工具结果「1 + 2 = 3」回灌 → 最终回复正常
+- [x] 场景 7（真实 context7 HTTP 全链路，AC2/AC8）：用户级 `~/.mewcode/config.yaml` 声明 context7（url + Bearer headers）→ tmux 启动无警告，注册出 resolve-library-id/query-docs → 提问「你现在能调用MCP工具吗？」→ Agent 经 run_command 查配置后自证调用 resolve-library-id（确认面板放行）返回 5 条候选，最终回复「能，而且刚实测通过」→ 追问 requests 文档 → query-docs 两次真实调用（安装方式/GET 用法）回灌真实文档，最终回复含代码示例与坑点提示 → /exit 退出，无残留进程

@@ -156,6 +156,9 @@ class _Handler(BaseHTTPRequestHandler):
                 },
                 json.dumps({"jsonrpc": "2.0", "id": 11, "result": {}}),
             )
+        elif self.path == "/accepted":
+            # 规范：notification 的应答形态是 202 Accepted、无响应体
+            self._reply(202, {}, "")
         else:
             self._reply(500, {"Content-Type": "text/plain"}, "boom")
 
@@ -256,6 +259,21 @@ def test_http_sse_hold_stream_grace(monkeypatch, http_server):
     )
     assert msg["id"] == 10
     assert msg["result"] == {"mode": "hold"}
+
+
+def test_http_202_notification_accepted(http_server):
+    """通知类请求：服务端按规范回 202 Accepted 无响应体，客户端不视为失败。"""
+    import asyncio
+
+    async def go():
+        transport = HttpTransport(_http_config(http_server, "/accepted"))
+        await transport.connect()
+        await transport.write_message(
+            {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        )
+        await transport.close()
+
+    asyncio.run(go())  # 不抛错即通过
 
 
 def test_http_non_200(http_server):

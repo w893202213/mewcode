@@ -3,7 +3,8 @@
 - StdioTransport：换行分隔 JSON（MCP stdio 规范：消息单行、无内嵌换行）
 - HttpTransport：POST 发请求；响应兼容两种形态——单 JSON 体与
   text/event-stream（SSE，逐 `event: message` + `data:` 解析）；服务端
-  返回的 Mcp-Session-Id 存下并随后续请求回带。
+  返回的 Mcp-Session-Id 存下并随后续请求回带；HTTP 202 Accepted
+  （规范规定 notification 的应答形态，无响应体）视为正常。
 
 两个实现的 read_message 都向 RpcClient 的读循环提供「一条已解析的
 JSON 消息」；坏 JSON 一律抛 McpServerError（协议层据此标记连接损坏）。
@@ -120,6 +121,12 @@ class HttpTransport(Transport):
                 session_id = response.headers.get("mcp-session-id")
                 if session_id:
                     self._session_id = session_id
+                if response.status_code == 202:
+                    # 202 Accepted：规范规定 notification 的应答形态（无响应体），
+                    # 直接返回、不往收件箱放消息。若某 Server 对带 id 的
+                    # request 也回 202，等待方会在 RPC 超时后收到中文超时
+                    # 错误（fail-closed），不会误读空响应。
+                    return
                 if response.status_code != 200:
                     raise McpServerError(
                         f"HTTP 状态码 {response.status_code}，MCP Server 连接失败"

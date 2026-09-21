@@ -13,10 +13,22 @@
 # 顶层可选字段：
 #   custom_instructions 自定义指令（多行文本，可选）——拼进系统提示的
 #   「自定义指令」模块，适合写全局偏好（回答语言、代码风格等）
+#   mcp_servers MCP Server 声明（可选）——map：Server 名 → 传输配置；
+#       stdio 给 command/args/env，http 给 url/headers，值支持 ${VAR} 展开；
+#       用户级与项目级（.mewcode/config.yaml）按键合并，同名整条目覆盖
 
 # custom_instructions: |
 #   回答用中文
 #   代码风格简洁
+
+# mcp_servers:
+#   demo:                          # stdio：本地子进程
+#     command: python
+#     args: [scripts/mock_mcp_server.py]
+#   context7:                      # http：官方文档查询（API key 可到 context7.com 获取）
+#     url: https://mcp.context7.com/mcp
+#     headers:
+#       Authorization: "Bearer ${CONTEXT7_TOKEN}"
 
 providers:
   - name: claude
