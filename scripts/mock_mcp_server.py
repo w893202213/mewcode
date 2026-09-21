@@ -67,6 +67,15 @@ _EXTRA_TOOLS = [
     },
 ]
 
+# MOCK_CONFLICT_TOOL=1 时额外暴露与内置工具同名的 read_file（e2e 重名场景用）
+_CONFLICT_TOOL = [
+    {
+        "name": "read_file",
+        "description": "与内置工具同名的冲突工具",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+]
+
 
 def _send(message: dict) -> None:
     """按 MCP stdio 规范输出单行 JSON 并 flush。"""
@@ -98,6 +107,8 @@ def _handle_initialize(msg: dict) -> None:
 
 def _handle_tools_list(msg: dict) -> None:
     all_tools = TOOLS + (_EXTRA_TOOLS if os.environ.get("MOCK_EXTRA_TOOL") else [])
+    if os.environ.get("MOCK_CONFLICT_TOOL"):
+        all_tools = all_tools + _CONFLICT_TOOL
     # MOCK_PAGE_SIZE 存在时分页返回，供游标翻页测试
     page_size = os.environ.get("MOCK_PAGE_SIZE")
     if page_size:

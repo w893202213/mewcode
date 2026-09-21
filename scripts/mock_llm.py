@@ -13,6 +13,8 @@
   - "multi-tool-model"  → 单轮三个工具调用（read_file + grep_code + run_command）
   - "unknown-tool-model"→ 每轮调用不存在的 no_such_tool（触发连续未知工具停止）
   - "never-stop-model"  → 每轮调用 read_file（触发迭代上限）
+- ch08 MCP e2e：
+  - "mcp-model"         → 第一轮调用 MCP 工具 add（1+2），回灌后出最终文本
 
 收到的请求体会以 JSON 行追加写入 ./mock_requests.log，供检查 thinking 透传等字段。
 """
@@ -516,6 +518,18 @@ class MockHandler(BaseHTTPRequestHandler):
                     send(_anthropic_text_round("**完成！** 项目没问题。"))
             elif has_tools and model == "multi-tool-model":
                 send(_anthropic_multi_tool_events())
+            elif has_tools and model == "mcp-model":
+                # ch08 e2e：第一轮调用 MCP 工具 add，回灌后出最终文本
+                n = _anthropic_tool_result_count(body)
+                if n == 0:
+                    send(
+                        _anthropic_tool_round(
+                            "toolu_mcp_1", "add", {"a": 1, "b": 2},
+                            text="我用 MCP 的 add 工具算一下。",
+                        )
+                    )
+                else:
+                    send(_anthropic_text_round("**完成！** MCP 工具链可用，结果已回灌。"))
             elif has_tools and model == "danger-model":
                 send(_anthropic_multi_tool_events(DANGER_CALLS))
             elif has_tools and model == "unknown-tool-model":
