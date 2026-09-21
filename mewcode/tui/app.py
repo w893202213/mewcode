@@ -12,11 +12,13 @@ import json
 import queue
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import NestedCompleter
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.shortcuts import prompt
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
@@ -26,6 +28,7 @@ from rich.text import Text
 from mewcode import __version__
 from mewcode.agent import Agent, run_in_background
 from mewcode.agent.events import (
+    PermissionAskEvent,
     ProgressEvent,
     RoundEnd,
     RoundEndReason,
@@ -36,6 +39,7 @@ from mewcode.agent.events import (
     UsageEvent,
 )
 from mewcode.config import ProviderConfig
+from mewcode.permissions import MODE_LABELS, Action, Mode, PermissionGate, RuleSet, exact_rule
 from mewcode.provider.base import Provider
 from mewcode.session import ChatSession
 from mewcode.tools import ToolRegistry
@@ -55,12 +59,13 @@ _DISPLAY_RESULT_CHARS = 2000
 _CANCEL_DRAIN_TIMEOUT = 5.0
 
 
-def _print_welcome(console: Console, config: ProviderConfig) -> None:
+def _print_welcome(console: Console, config: ProviderConfig, gate: PermissionGate) -> None:
     """打印欢迎语（含配置名与模型，绝不回显 api_key）。"""
     lines = [
         f"配置: [bold]{config.name}[/bold]（协议 {config.protocol}）",
         f"模型: {config.model}",
         f"思考模式: {'开启' if config.thinking else '关闭'}",
+        f"权限模式: {MODE_LABELS[gate.mode]}（{gate.mode.value}，/mode 切换）",
         "输入 /help 查看可用命令。",
     ]
     console.print(
@@ -73,10 +78,14 @@ def run(
     config: ProviderConfig,
     registry: ToolRegistry,
     custom_instructions: str = "",
+    gate: PermissionGate | None = None,
 ) -> None:
     """TUI 主循环：读输入 → 命令或 Agent Loop → 回到输入。"""
+    if gate is None:
+        # 缺省闸门（与 Agent 缺省一致）：项目根=cwd、默认档、空规则
+        gate = PermissionGate(Path.cwd().resolve(), RuleSet(), Mode.DEFAULT)
     session = ChatSession()
-    agent = Agent(provider, registry, session, custom_instructions=custom_instructions)
+    agent = Agent(provider, registry, session, custom_instructions=custom_instructions, gate=gate)
 
     # 双击 Ctrl+C 判定：第一次提示（不清行），3 秒内第二次退出
     tracker = DoublePressTracker()
@@ -104,7 +113,7 @@ def run(
     # patch_stdout(raw=True)：Rich 输出与 prompt_toolkit 输入行共存
     with patch_stdout(raw=True):
         console = Console()
-        _print_welcome(console, config)
+        _print_welcome(console, config, gate)
 
         while True:
             try:
@@ -140,7 +149,7 @@ def _agent_round(console: Console, agent: Agent, text: str, tracker: DoublePress
     usage: dict[str, int | None] = {"in": 0, "out": 0, "cache_hit": None, "cache_write": None}
     end: RoundEnd | None = None
     try:
-        end = _consume_events(console, q, usage)
+        end = _consume_events(console, q, usage, agent, gate)
     except KeyboardInterrupt:
         agent.cancel()
         tracker.reset()  # 双击退出计数从头开始
@@ -153,7 +162,13 @@ def _agent_round(console: Console, agent: Agent, text: str, tracker: DoublePress
     _print_end(console, usage, end)
 
 
-def _consume_events(console: Console, q: queue.Queue, usage: dict[str, int | None]) -> RoundEnd:
+def _consume_events(
+    console: Console,
+    q: queue.Queue,
+    usage: dict[str, int | None],
+    agent: Agent,
+    gate: PermissionGate,
+) -> RoundEnd:
     """消费事件队列直到 RoundEnd；返回结束事件。
 
     每轮一个 Live（流式正文 + 思考计时），工具调用与结果在流结束后逐条
@@ -258,6 +273,11 @@ def _consume_events(console: Console, q: queue.Queue, usage: dict[str, int | Non
             elif isinstance(event, ToolCallStarted):
                 close_live()
                 _print_tool_call(console, event.call)
+            elif isinstance(event, PermissionAskEvent):
+                close_live()
+                # 人在回路：主线程询问用户，应答后放行/拒绝（ch07 F5）
+                allow = _ask_user(console, event, gate)
+                agent.answer_permission(allow)
             elif isinstance(event, ToolResultEvent):
                 _print_tool_result(console, event.result)
             elif isinstance(event, UsageEvent):
@@ -336,6 +356,43 @@ def _print_end(console: Console, usage: dict[str, int | None], end: RoundEnd) ->
                 border_style="yellow",
             )
         )
+
+
+def _ask_user(console: Console, event: PermissionAskEvent, gate: PermissionGate) -> bool:
+    """权限询问：展示面板并等待用户选择；返回是否放行（ch07 F5）。
+
+    y=本次允许 / s=本会话允许（登记会话规则）/ a=永久允许（写本地级 YAML）
+    / n=拒绝。Ctrl+C 向上抛（沿既有取消路径）；EOF 按拒绝处理（循环继续）。
+    """
+    summary = json.dumps(event.call.args, ensure_ascii=False)
+    if len(summary) > _ARGS_SUMMARY_CHARS:
+        summary = summary[: _ARGS_SUMMARY_CHARS] + "…"
+    console.print(
+        Panel(
+            f"工具: {event.call.name}\n参数: {summary}\n原因: {event.reason}",
+            title="[bold yellow]⚠ 需要权限确认[/bold yellow]",
+            border_style="yellow",
+        )
+    )
+    while True:
+        try:
+            answer = prompt("  [y] 本次允许  [s] 本会话允许  [a] 永久允许  [n] 拒绝 > ")
+        except EOFError:
+            return False  # EOF 按拒绝：循环继续，模型可调整策略
+        answer = answer.strip().lower()
+        if answer in ("y", "s", "a", "n"):
+            break
+    if answer == "y":
+        return True
+    if answer == "n":
+        return False
+    # 会话/永久允许：按最小授权登记精确规则（ch07 技术决策）
+    rule = exact_rule(event.call.name, event.call.args, Action.ALLOW)
+    if answer == "s":
+        gate.grant_session(rule)
+    else:
+        gate.grant_permanent(rule)
+    return True
 
 
 def _print_tool_call(console: Console, call) -> None:

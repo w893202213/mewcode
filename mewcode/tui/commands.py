@@ -16,7 +16,7 @@ class CommandResult(Enum):
 
 
 # 可用命令列表（供补全与 /help 展示）
-COMMAND_NAMES = ["/exit", "/clear", "/help", "/plan", "/do"]
+COMMAND_NAMES = ["/exit", "/clear", "/help", "/plan", "/do", "/mode"]
 
 _HELP_TEXT = "\n".join(
     [
@@ -26,6 +26,7 @@ _HELP_TEXT = "\n".join(
         "  /help   显示本帮助",
         "  /plan   进入计划模式：仅只读工具可用，模型先调研并给出计划",
         "  /do     退出计划模式：切回全部工具，按计划执行",
+        "  /mode   循环切换权限档位：严格 → 默认 → 放行",
         "输入历史可用上下方向键回溯。",
     ]
 )
@@ -59,4 +60,12 @@ def handle_command(
             agent.exit_plan_mode()
             return CommandResult.CONTINUE, "已切回执行模式，可以按计划动手了。"
         return CommandResult.CONTINUE, "当前不在计划模式。"
+    if command == "/mode":
+        from mewcode.permissions import MODE_LABELS
+
+        new_mode = agent.cycle_permission_mode()
+        return CommandResult.CONTINUE, (
+            f"权限模式已切换为「{MODE_LABELS[new_mode]}」（{new_mode.value}）。"
+            "再次输入 /mode 切换下一档。"
+        )
     return CommandResult.CONTINUE, f"未知命令: {command}（输入 /help 查看可用命令）"

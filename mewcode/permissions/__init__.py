@@ -4,7 +4,13 @@
 与应答在 agent 层完成（PermissionAskEvent + Agent.answer_permission）。
 """
 
-from mewcode.permissions.gate import MODE_LABELS, Mode, PermissionGate, Verdict
+from mewcode.permissions.gate import (
+    MODE_LABELS,
+    Mode,
+    PermissionGate,
+    Verdict,
+    exact_rule,
+)
 from mewcode.permissions.rules import Action, Rule, RuleSet
 
 __all__ = [
@@ -15,4 +21,5 @@ __all__ = [
     "Rule",
     "RuleSet",
     "Verdict",
+    "exact_rule",
 ]

@@ -54,19 +54,28 @@ class Verdict:
     reason: str = ""
 
 
-def _rule_value(tool: Tool, call: ToolCall) -> str:
+def _rule_value(tool_name: str, args: dict) -> str:
     """规则匹配用的参数值：run_command → command；文件工具 → 主参数。
 
     read_file/write_file/edit_file 用 file_path；find_files/grep_code 的
     主参数是 pattern（path 由沙箱单独约束）。
     """
-    if tool.name == "run_command":
-        return str(call.args.get("command", ""))
-    if tool.name in {"read_file", "write_file", "edit_file"}:
-        return str(call.args.get("file_path", ""))
-    if tool.name in {"find_files", "grep_code"}:
-        return str(call.args.get("pattern", ""))
+    if tool_name == "run_command":
+        return str(args.get("command", ""))
+    if tool_name in {"read_file", "write_file", "edit_file"}:
+        return str(args.get("file_path", ""))
+    if tool_name in {"find_files", "grep_code"}:
+        return str(args.get("pattern", ""))
     return ""
+
+
+def exact_rule(tool_name: str, args: dict, action: Action) -> Rule:
+    """由一次调用构造精确规则（本会话/永久允许登记用）。
+
+    最小授权：只覆盖被询问的那次调用形态（如 run_command(git status)），
+    想要宽模式可在 YAML 手写 glob。
+    """
+    return Rule(tool_name, _rule_value(tool_name, args), action)
 
 
 class PermissionGate:
@@ -93,7 +102,7 @@ class PermissionGate:
                 if not ok:
                     return Verdict(Action.DENY, reason)
         # 层 3：规则合并（deny > ask > allow，与所在层级无关）
-        value = _rule_value(tool, call)
+        value = _rule_value(tool.name, call.args)
         actions = self._rules.match(tool.name, value)
         if Action.DENY in actions:
             return Verdict(Action.DENY, f"命中拒绝规则 {tool.name}({value})")

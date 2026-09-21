@@ -7,7 +7,14 @@ import os
 import sys
 from pathlib import Path
 
-from mewcode.config import ConfigError, load_config, load_custom_instructions, select_profile
+from mewcode.config import (
+    ConfigError,
+    load_config,
+    load_custom_instructions,
+    load_permission_mode,
+    select_profile,
+)
+from mewcode.permissions import PermissionGate, RuleSet
 from mewcode.provider import create_provider
 from mewcode.tools import create_registry
 from mewcode.tui.app import run
@@ -34,12 +41,32 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _build_gate(config_path: str) -> PermissionGate:
+    """装配权限闸门：三规则文件合并读取 + 启动档位（ch07 F3/F4）。
+
+    规则文件损坏或 permission_mode 非法抛 ConfigError（fail-closed）。
+    """
+    root = Path.cwd()
+    local_path = root / ".mewcode" / "permissions.local.yaml"
+    rules = RuleSet()
+    rules.load_from(
+        [
+            Path.home() / ".mewcode" / "permissions.yaml",
+            root / ".mewcode" / "permissions.yaml",
+            local_path,
+        ],
+        local_path,
+    )
+    return PermissionGate(root.resolve(), rules, load_permission_mode(config_path))
+
+
 def main(argv: list[str] | None = None) -> None:
     """入口：配置错误打印到 stderr 并以非零码退出。"""
     args = _parse_args(argv)
     try:
         configs = load_config(args.config)
         config = select_profile(configs, args.profile)
+        gate = _build_gate(args.config)
     except ConfigError as e:
         print(f"配置错误: {e}", file=sys.stderr)
         sys.exit(1)
@@ -47,4 +74,4 @@ def main(argv: list[str] | None = None) -> None:
     provider = create_provider(config)
     registry = create_registry()
     custom_instructions = load_custom_instructions(args.config)
-    run(provider, config, registry, custom_instructions)
+    run(provider, config, registry, custom_instructions, gate)

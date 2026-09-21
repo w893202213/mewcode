@@ -237,13 +237,22 @@ def _anthropic_text_round(text: str) -> list[str]:
     ]
 
 
-def _anthropic_multi_tool_events() -> list[str]:
-    """单轮三个 tool_use 块（read_file + grep_code + run_command）。"""
-    calls = [
-        ("toolu_m1", "read_file", {"file_path": "pyproject.toml"}),
-        ("toolu_m2", "grep_code", {"pattern": "version"}),
-        ("toolu_m3", "run_command", {"command": "echo batch ok"}),
-    ]
+# multi-tool-model 的三个调用（read_file + grep_code + run_command）
+MULTI_TOOL_CALLS = [
+    ("toolu_m1", "read_file", {"file_path": "pyproject.toml"}),
+    ("toolu_m2", "grep_code", {"pattern": "version"}),
+    ("toolu_m3", "run_command", {"command": "echo batch ok"}),
+]
+# danger-model 的三个调用：黑名单（sudo rm -rf /）+ 沙箱越界 + 项目内写入（ch07 e2e）
+DANGER_CALLS = [
+    ("toolu_d1", "run_command", {"command": "sudo rm -rf /"}),
+    ("toolu_d2", "write_file", {"file_path": "../escape.txt", "content": "escape"}),
+    ("toolu_d3", "write_file", {"file_path": "note_ok.txt", "content": "ok"}),
+]
+
+
+def _anthropic_multi_tool_events(calls: list = MULTI_TOOL_CALLS) -> list[str]:
+    """单轮多个 tool_use 块（参数化调用列表）。"""
     events = []
     for index, (tid, name, args) in enumerate(calls):
         events.append(
@@ -391,13 +400,8 @@ def _openai_text_round_chunks(text: str) -> list[str]:
     ]
 
 
-def _openai_multi_tool_chunks() -> list[str]:
-    """单轮三个 tool_calls（read_file + grep_code + run_command，带 index）。"""
-    calls = [
-        ("call_m1", "read_file", {"file_path": "pyproject.toml"}),
-        ("call_m2", "grep_code", {"pattern": "version"}),
-        ("call_m3", "run_command", {"command": "echo batch ok"}),
-    ]
+def _openai_multi_tool_chunks(calls: list = MULTI_TOOL_CALLS) -> list[str]:
+    """单轮多个 tool_calls（参数化调用列表，带 index）。"""
     chunks = [
         json.dumps(
             {
@@ -512,6 +516,8 @@ class MockHandler(BaseHTTPRequestHandler):
                     send(_anthropic_text_round("**完成！** 项目没问题。"))
             elif has_tools and model == "multi-tool-model":
                 send(_anthropic_multi_tool_events())
+            elif has_tools and model == "danger-model":
+                send(_anthropic_multi_tool_events(DANGER_CALLS))
             elif has_tools and model == "unknown-tool-model":
                 send(_anthropic_tool_round("toolu_unk", "no_such_tool", {}))
             elif has_tools and model == "never-stop-model":
@@ -553,6 +559,8 @@ class MockHandler(BaseHTTPRequestHandler):
                     self._send_sse(_openai_text_round_chunks("**完成！** 项目没问题。"))
             elif has_tools and model == "multi-tool-model":
                 self._send_sse(_openai_multi_tool_chunks())
+            elif has_tools and model == "danger-model":
+                self._send_sse(_openai_multi_tool_chunks(DANGER_CALLS))
             elif has_tools and model == "unknown-tool-model":
                 self._send_sse(_openai_tool_round_chunks("call_unk", "no_such_tool", {}))
             elif has_tools and model == "never-stop-model":
