@@ -133,6 +133,35 @@ def _anthropic_tool_result_count(body: dict) -> int:
     return count
 
 
+def _anthropic_message_start(body: dict) -> str:
+    """message_start 事件：首轮写缓存、后续轮读缓存（模拟真实缓存行为，供 e2e 观察）。
+
+    真实协议里输入与缓存字段在 message_start 携带；首轮请求无回灌结果
+    （首次建立缓存前缀），后续轮有工具结果回灌（前缀命中）。
+    """
+    n = _anthropic_tool_result_count(body)
+    if n == 0:
+        usage = {
+            "input_tokens": 800, "output_tokens": 1,
+            "cache_creation_input_tokens": 600, "cache_read_input_tokens": 0,
+        }
+    else:
+        usage = {
+            "input_tokens": 800, "output_tokens": 1,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 600,
+        }
+    return json.dumps(
+        {
+            "type": "message_start",
+            "message": {
+                "id": "msg_mock", "type": "message", "role": "assistant",
+                "model": body.get("model", ""), "content": [], "usage": usage,
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
 def _openai_tool_result_count(body: dict) -> int:
     return sum(1 for m in body.get("messages", []) if m.get("role") == "tool")
 
@@ -180,7 +209,7 @@ def _anthropic_tool_round(
             {
                 "type": "message_delta",
                 "delta": {"stop_reason": "tool_use"},
-                "usage": {"input_tokens": 100, "output_tokens": 42},
+                "usage": {"output_tokens": 42},
             }
         )
     )
@@ -201,7 +230,7 @@ def _anthropic_text_round(text: str) -> list[str]:
             {
                 "type": "message_delta",
                 "delta": {"stop_reason": "end_turn"},
-                "usage": {"input_tokens": 100, "output_tokens": 42},
+                "usage": {"output_tokens": 42},
             }
         ),
         json.dumps({"type": "message_stop"}),
@@ -242,7 +271,7 @@ def _anthropic_multi_tool_events() -> list[str]:
             {
                 "type": "message_delta",
                 "delta": {"stop_reason": "tool_use"},
-                "usage": {"input_tokens": 100, "output_tokens": 42},
+                "usage": {"output_tokens": 42},
             }
         )
     )
@@ -324,7 +353,7 @@ def _openai_tool_round_chunks(
                 "id": "c1",
                 "object": "chat.completion.chunk",
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 42},
+                "usage": {"prompt_tokens": 500, "completion_tokens": 42, "prompt_cache_hit_tokens": 400, "prompt_cache_miss_tokens": 100},
             }
         )
     )
@@ -355,7 +384,7 @@ def _openai_text_round_chunks(text: str) -> list[str]:
                 "id": "c1",
                 "object": "chat.completion.chunk",
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 42},
+                "usage": {"prompt_tokens": 500, "completion_tokens": 42, "prompt_cache_hit_tokens": 400, "prompt_cache_miss_tokens": 100},
             }
         ),
         "data: [DONE]",
@@ -429,7 +458,7 @@ def _openai_multi_tool_chunks() -> list[str]:
                 "id": "c1",
                 "object": "chat.completion.chunk",
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 42},
+                "usage": {"prompt_tokens": 500, "completion_tokens": 42, "prompt_cache_hit_tokens": 400, "prompt_cache_miss_tokens": 100},
             }
         )
     )
@@ -448,47 +477,52 @@ class MockHandler(BaseHTTPRequestHandler):
             f.write(json.dumps({"path": self.path, "body": body}, ensure_ascii=False) + "\n")
         model = body.get("model", "")
         has_tools = bool(body.get("tools"))
+
+        def send(events: list[str]) -> None:
+            """Anthropic 响应统一前置 message_start（携带输入与缓存用量，真实协议形态）。"""
+            self._send_sse([_anthropic_message_start(body)] + events)
+
         if self.path.endswith("/v1/messages"):
             if model == "error-model":
                 self._send_sse(['{"type":"error","error":{"type":"overloaded_error","message":"mock 服务过载"}}'])
             elif model == "unauthorized-model":
                 self._send_json(401, {"error": {"message": "mock invalid api key"}})
             elif has_tools and model == "tool-model":
-                self._send_sse(ANTHROPIC_TOOL_EVENTS)
+                send(ANTHROPIC_TOOL_EVENTS)
             elif has_tools and model == "tool-cmd-model":
-                self._send_sse(ANTHROPIC_CMD_EVENTS)
+                send(ANTHROPIC_CMD_EVENTS)
             elif has_tools and model == "tool-badjson-model":
-                self._send_sse(ANTHROPIC_BADJSON_EVENTS)
+                send(ANTHROPIC_BADJSON_EVENTS)
             elif has_tools and model == "loop-model":
                 n = _anthropic_tool_result_count(body)
                 if n == 0:
-                    self._send_sse(
+                    send(
                         _anthropic_tool_round(
                             "toolu_loop_1", "read_file", {"file_path": "pyproject.toml"},
                             text="我先看看项目结构。",
                         )
                     )
                 elif n == 1:
-                    self._send_sse(
+                    send(
                         _anthropic_tool_round(
                             "toolu_loop_2", "run_command", {"command": "echo hello from loop"}
                         )
                     )
                 else:
-                    self._send_sse(_anthropic_text_round("**完成！** 项目没问题。"))
+                    send(_anthropic_text_round("**完成！** 项目没问题。"))
             elif has_tools and model == "multi-tool-model":
-                self._send_sse(_anthropic_multi_tool_events())
+                send(_anthropic_multi_tool_events())
             elif has_tools and model == "unknown-tool-model":
-                self._send_sse(_anthropic_tool_round("toolu_unk", "no_such_tool", {}))
+                send(_anthropic_tool_round("toolu_unk", "no_such_tool", {}))
             elif has_tools and model == "never-stop-model":
-                self._send_sse(
+                send(
                     _anthropic_tool_round("toolu_never", "read_file", {"file_path": "pyproject.toml"})
                 )
             elif "thinking" in body:
-                self._send_sse(ANTHROPIC_EVENTS)
+                send(ANTHROPIC_EVENTS)
             else:
                 # 请求未启用 thinking：只返回文本块（真实 API 行为一致）
-                self._send_sse(ANTHROPIC_TEXT_ONLY_EVENTS)
+                send(ANTHROPIC_TEXT_ONLY_EVENTS)
         elif self.path.endswith("/v1/chat/completions"):
             if model == "error-model":
                 self._send_sse(['{"error":{"message":"mock 服务出错"}}'])
