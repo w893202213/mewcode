@@ -73,6 +73,11 @@ class ChatSession:
         """清空全部历史。"""
         self.messages.clear()
 
-    def clear(self) -> None:
-        """清空全部历史。"""
-        self.messages.clear()
+    def replace_head(self, end: int, new_messages: list[Message]) -> None:
+        """丢弃前 end 条消息，头部换成 new_messages（ch09 压缩重构用）。
+
+        end 越界抛 ValueError——调用方必须先选好保留区起点。
+        """
+        if end < 0 or end > len(self.messages):
+            raise ValueError(f"replace_head 越界: end={end}，消息总数 {len(self.messages)}")
+        self.messages[:end] = new_messages

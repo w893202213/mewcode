@@ -37,3 +37,46 @@ def test_clear():
     s.add_assistant("b")
     s.clear()
     assert s.messages == []
+
+
+def test_replace_head_replaces_prefix():
+    s = ChatSession()
+    s.add_user("u1")
+    s.add_assistant("a1")
+    s.add_user("u2")
+    s.add_assistant("a2")
+    s.replace_head(2, [])
+    assert [(m.role, m.text) for m in s.messages] == [("user", "u2"), ("assistant", "a2")]
+
+
+def test_replace_head_inserts_new_messages():
+    from mewcode.session import Message
+
+    s = ChatSession()
+    s.add_user("u1")
+    s.add_assistant("a1")
+    s.add_user("u2")
+    s.replace_head(2, [Message(role="user", text="摘要"), Message(role="user", text="边界")])
+    assert [(m.role, m.text) for m in s.messages] == [
+        ("user", "摘要"),
+        ("user", "边界"),
+        ("user", "u2"),
+    ]
+
+
+def test_replace_head_end_zero_pure_insert():
+    from mewcode.session import Message
+
+    s = ChatSession()
+    s.add_user("u1")
+    s.replace_head(0, [Message(role="user", text="头部")])
+    assert [(m.role, m.text) for m in s.messages] == [("user", "头部"), ("user", "u1")]
+
+
+def test_replace_head_out_of_range_raises():
+    import pytest
+
+    s = ChatSession()
+    s.add_user("u1")
+    with pytest.raises(ValueError):
+        s.replace_head(2, [])
