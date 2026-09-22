@@ -265,3 +265,32 @@ def test_time_gap_notice_threshold(tmp_path):
     assert messages[-1].summary is True
     # last_ts 为 None：不插入
     assert maybe_add_time_gap_notice([], None, time.time()) is False
+
+
+def test_load_half_byte_utf8_tail_does_not_crash(tmp_path):
+    """崩溃尾巴截断在多字节字符中间：恢复不崩溃，残行按坏行跳过（e2e 发现）。"""
+    store = SessionStore(tmp_path / "sessions")
+    path = store.directory / "s1.jsonl"
+    good = '{"type": "user", "text": "问题", "ts": 1.0}\n'
+    # 「没写完」的「写」字 UTF-8 是 3 字节，只留 1 字节模拟半行截断
+    tail = ('{"type": "assistant", "text": "半行' + "写".encode("utf-8")[:1].decode("utf-8", errors="replace"))
+    path.write_bytes((good + tail).encode("utf-8"))
+    result = store.load("s1")
+    assert result.messages[0].text == "问题"
+    assert result.skipped_lines == 1  # 残行按坏行跳过
+
+
+def test_log_append_half_byte_tail_gets_newline_fix(tmp_path):
+    """追加打开半字节尾巴的文件：二进制补换行、新行不粘连（e2e 发现）。"""
+    from mewcode.memory.sessions import SessionLog
+
+    store = SessionStore(tmp_path / "sessions")
+    path = store.directory / "s1.jsonl"
+    tail = '{"type": "user", "text": "残' + "写".encode("utf-8")[:1].decode("utf-8", errors="replace")
+    path.write_bytes(tail.encode("utf-8"))
+    log = SessionLog(path)
+    log.append_messages([Message(role="user", text="新消息")], 1.0)
+    log.close()
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    assert len(lines) == 2  # 残行与新增行不粘连
+    assert json.loads(lines[1])["text"] == "新消息"

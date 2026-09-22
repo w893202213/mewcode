@@ -68,14 +68,16 @@ class SessionLog:
     def __init__(self, path: Path) -> None:
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
-        # a+ 追加模式打开（不截断，可读）；文件非空且末尾无换行（手工
-        # 编辑或崩溃尾巴）时先补一个换行——否则新行与残行粘连成坏行丢数据
-        self._file = path.open("a+", encoding="utf-8")
-        self._file.seek(0, os.SEEK_END)
-        if self._file.tell() > 0:
-            self._file.seek(self._file.tell() - 1)
-            if self._file.read(1) != "\n":
-                self._file.write("\n")
+        # 先以二进制模式检查末尾字节：非空且末尾无换行（手工编辑或
+        # 崩溃尾巴）时补一个换行——否则新行与残行粘连成坏行丢数据。
+        # 二进制读写不做 UTF-8 解码：崩溃尾巴可能截断在多字节字符中间。
+        with path.open("a+b") as raw:
+            raw.seek(0, os.SEEK_END)
+            if raw.tell() > 0:
+                raw.seek(raw.tell() - 1)
+                if raw.read(1) != b"\n":
+                    raw.write(b"\n")
+        self._file = path.open("a", encoding="utf-8")
 
     def append_messages(self, messages: list[Message], ts: float) -> None:
         """逐条消息写一行 JSON 并 flush（崩溃最多丢最后一行）。"""
@@ -197,7 +199,7 @@ class SessionStore:
         # pending_marker = 该 assistant 行在 records 中的下标（截断回退点）
         pending_ids: set[str] | None = None
         pending_marker = 0
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             if not line.strip():
                 continue
             msg = _parse_line(line)
@@ -255,7 +257,7 @@ class SessionStore:
                 mtime = path.stat().st_mtime
                 title = ""
                 count = 0
-                for line in path.read_text(encoding="utf-8").splitlines():
+                for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                     msg = _parse_line(line)
                     if msg is None:
                         continue
