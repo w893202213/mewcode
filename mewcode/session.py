@@ -33,6 +33,7 @@ class Message:
     thinking_raw: list[dict] = field(default_factory=list)  # 原始思考块，多轮时原样回传
     tool_uses: list[ToolUse] = field(default_factory=list)  # assistant 消息的工具调用
     tool_results: list[ToolResultRecord] = field(default_factory=list)  # user 消息的工具结果
+    summary: bool = False  # 压缩产物标记（摘要消息/边界消息）：二次压缩时不再当作用户原文（ch09）
 
 
 class ChatSession:

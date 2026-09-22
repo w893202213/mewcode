@@ -113,8 +113,8 @@ class Compressor:
     # ---- 重量兜底（F4/F5）----
 
     def _is_user_text(self, m: Message) -> bool:
-        """纯用户文本消息（不含工具结果）——压缩时原文保留（N1）。"""
-        return m.role == "user" and not m.tool_results
+        """纯用户文本消息（不含工具结果、非压缩产物）——压缩时原文保留（N1）。"""
+        return m.role == "user" and not m.tool_results and not m.summary
 
     def _keep_budget(self, messages: list[Message], manual: bool) -> int:
         """保留区 token 预算。
@@ -181,8 +181,9 @@ class Compressor:
         # 成功一次即清零熔断计数（F6）
         self._failures = 0
         new_head = list(kept_users) + [
-            Message(role="user", text=summary_text),  # 摘要消息
-            Message(role="user", text=BOUNDARY_NOTICE),  # 边界消息
+            # summary=True：压缩产物，二次压缩时不再当作用户原文（N1/N4）
+            Message(role="user", text=summary_text, summary=True),  # 摘要消息
+            Message(role="user", text=BOUNDARY_NOTICE, summary=True),  # 边界消息
         ]
         session.replace_head(keep_start, new_head)
         after_chars = sum(message_chars(m) for m in session.messages)

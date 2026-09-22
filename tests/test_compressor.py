@@ -199,6 +199,21 @@ def test_summarize_missing_formal_section_fails(tmp_path):
         c.summarize(s)
 
 
+def test_second_summarize_drops_old_summary_messages(tmp_path):
+    """二次压缩：旧摘要/边界是压缩产物，不被当作用户原文保留（N4）。"""
+    c, s, _ = _summarize_session(tmp_path)
+    assert sum(1 for m in s.messages if m.summary) == 2  # 摘要 + 边界
+    # 继续累积长消息，让摘要区再次非空
+    s.add_tool_result(ToolResultRecord("9", "结果九" * 200, False))
+    s.add_assistant("回答九" * 200)
+    s.add_tool_result(ToolResultRecord("10", "结果十" * 200, False))
+    result = c.summarize(s)
+    # 只有真正的用户消息被原文保留；旧摘要被摘进新摘要、新边界替换旧边界
+    assert result.kept_user_messages == 2  # U1 + U2
+    assert sum(1 for m in s.messages if m.summary) == 2
+    assert sum(1 for m in s.messages if "测试摘要" in m.text) == 1
+
+
 def test_manual_mode_budget_stays_below_margin(tmp_path):
     """手动模式：压缩后估算总量 ≤ 窗口 − 3000（AC7）。"""
     window = 10000

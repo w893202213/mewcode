@@ -239,6 +239,38 @@ def _anthropic_text_round(text: str) -> list[str]:
     ]
 
 
+# ch09 e2e：摘要响应——分析草稿段（用后即弃）+ 正式摘要段（6 固定部分）
+SUMMARY_TEXT = (
+    "<分析草稿>\n历史要点：用户正在使用 MewCode 处理项目任务，多轮工具调用已完成。\n</分析草稿>\n"
+    "<正式摘要>\n"
+    "## 总体目标与状态\n用户正在使用 MewCode 处理项目任务。\n"
+    "## 已完成工作\n- 完成多轮工具调用（读取文件、执行命令）\n"
+    "## 关键文件与代码\n- pyproject.toml\n"
+    "## 重要事实与决策\n- 无\n"
+    "## 未完成事项\n- 继续当前任务\n"
+    "## 注意事项\n- 以上为历史摘要，非原始对话\n"
+    "</正式摘要>"
+)
+
+
+def _is_summary_request(body: dict) -> bool:
+    """ch09 e2e：tools 为空且系统指令含「会话历史压缩器」→ 摘要请求。
+
+    Anthropic 的 system 是块列表；OpenAI 兼容服务把系统提示放进
+    messages 里 role=system 的消息。
+    """
+    system_texts = []
+    system = body.get("system")
+    if isinstance(system, list):
+        system_texts.extend(
+            b.get("text", "") for b in system if isinstance(b, dict)
+        )
+    for m in body.get("messages") or []:
+        if isinstance(m, dict) and m.get("role") == "system":
+            system_texts.append(str(m.get("content", "")))
+    return "会话历史压缩器" in "".join(system_texts)
+
+
 # multi-tool-model 的三个调用（read_file + grep_code + run_command）
 MULTI_TOOL_CALLS = [
     ("toolu_m1", "read_file", {"file_path": "pyproject.toml"}),
@@ -538,6 +570,21 @@ class MockHandler(BaseHTTPRequestHandler):
                 send(
                     _anthropic_tool_round("toolu_never", "read_file", {"file_path": "pyproject.toml"})
                 )
+            elif has_tools and model == "compact-model":
+                # ch09 e2e：每轮对话读一次大文件，多轮累积触发自动压缩
+                n = _anthropic_tool_result_count(body)
+                if n < 6:
+                    send(
+                        _anthropic_tool_round(
+                            f"toolu_c{n}", "read_file", {"file_path": "pyproject.toml"},
+                            text="我读一下文件。",
+                        )
+                    )
+                else:
+                    send(_anthropic_text_round("**完成！** 上下文压缩 e2e 通过。"))
+            elif not has_tools and _is_summary_request(body):
+                # ch09 e2e：上下文压缩的摘要调用（tools 为空 + 摘要指令）
+                send(_anthropic_text_round(SUMMARY_TEXT))
             elif "thinking" in body:
                 send(ANTHROPIC_EVENTS)
             else:
@@ -581,6 +628,21 @@ class MockHandler(BaseHTTPRequestHandler):
                 self._send_sse(
                     _openai_tool_round_chunks("call_never", "read_file", {"file_path": "pyproject.toml"})
                 )
+            elif has_tools and model == "compact-model":
+                # ch09 e2e：每轮对话读一次大文件，多轮累积触发自动压缩
+                n = _openai_tool_result_count(body)
+                if n < 6:
+                    self._send_sse(
+                        _openai_tool_round_chunks(
+                            f"call_c{n}", "read_file", {"file_path": "pyproject.toml"},
+                            text="我读一下文件。",
+                        )
+                    )
+                else:
+                    self._send_sse(_openai_text_round_chunks("**完成！** 上下文压缩 e2e 通过。"))
+            elif not has_tools and _is_summary_request(body):
+                # ch09 e2e：上下文压缩的摘要调用（tools 为空 + 摘要指令）
+                self._send_sse(_openai_text_round_chunks(SUMMARY_TEXT))
             else:
                 self._send_sse(OPENAI_CHUNKS)
         else:
