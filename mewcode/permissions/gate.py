@@ -66,7 +66,7 @@ def _rule_value(tool_name: str, args: dict) -> str:
         return str(args.get("file_path", ""))
     if tool_name in {"find_files", "grep_code"}:
         return str(args.get("pattern", ""))
-    return ""
+    return "*"  # MCP 等无参数级 pattern 概念的工具：匹配任意
 
 
 def exact_rule(tool_name: str, args: dict, action: Action) -> Rule:

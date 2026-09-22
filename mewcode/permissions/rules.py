@@ -14,6 +14,7 @@ deny > ask > allow（与所在层级无关）。
 from __future__ import annotations
 
 import fnmatch
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -101,8 +102,11 @@ class RuleSet:
         self._local_path = local_path
 
     @staticmethod
-    def _parse_rule_file(path: Path) -> list[Rule]:
-        """解析一个 YAML 规则文件为 Rule 列表；校验失败抛 ConfigError。"""
+    def _parse_rule_file(path: Path, *, warn: bool = True) -> list[Rule]:
+        """解析一个 YAML 规则文件为 Rule 列表；校验失败抛 ConfigError。
+
+        warn=False 时对空 pattern 只规范化不提示（追加写回前读取旧文件用）。
+        """
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
         except yaml.YAMLError as e:
@@ -120,8 +124,17 @@ class RuleSet:
             action = item.get("action")
             if not isinstance(tool, str) or not tool:
                 raise ConfigError(f"权限规则文件 {path} 第 {i} 条 tool 无效: {tool!r}")
-            if not isinstance(pattern, str) or not pattern:
-                raise ConfigError(f"权限规则文件 {path} 第 {i} 条 pattern 缺失")
+            if not isinstance(pattern, str):
+                raise ConfigError(f"权限规则文件 {path} 第 {i} 条 pattern 无效: {pattern!r}")
+            if not pattern:
+                # 空 pattern 无合法语义（旧版对 MCP 工具写入的残留），按匹配任意处理
+                if warn:
+                    print(
+                        f"警告: 权限规则文件 {path} 第 {i} 条 pattern 为空，"
+                        "已按匹配任意（*）处理",
+                        file=sys.stderr,
+                    )
+                pattern = "*"
             try:
                 action_enum = Action(str(action).strip().lower())
             except ValueError:
@@ -159,7 +172,7 @@ class RuleSet:
         if self._local_path is None:
             raise ConfigError("未配置本地级规则文件路径，无法写入永久规则")
         existing = (
-            self._parse_rule_file(self._local_path)
+            self._parse_rule_file(self._local_path, warn=False)
             if self._local_path.is_file()
             else []
         )

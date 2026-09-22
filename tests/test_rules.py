@@ -198,3 +198,61 @@ def test_append_to_local_file_preserves_existing(tmp_path):
     rs2.load_from([local], local)
     assert rs2.verdict("read_file", "a/.env", Action.ALLOW) is Action.DENY
     assert rs2.verdict("run_command", "git status", Action.ALLOW) is Action.ALLOW
+
+
+# ---------------------------------------------------------------------------
+# 空 pattern 处理（ch10）
+# ---------------------------------------------------------------------------
+
+
+def test_load_from_empty_pattern_normalized_with_warning(tmp_path, capsys):
+    """ch10 F2：空 pattern 规范化为 * 并打印提示，不阻塞加载。"""
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        "rules:\n  - tool: resolve-library-id\n    pattern: ''\n    action: allow\n",
+        encoding="utf-8",
+    )
+    rs = RuleSet()
+    rs.load_from([bad], tmp_path / "local.yaml")
+    assert rs.match("resolve-library-id", "*") == [Action.ALLOW]
+    assert "第 1 条 pattern 为空" in capsys.readouterr().err
+
+
+def test_append_normalizes_silently(tmp_path, capsys):
+    """ch10：追加写回时旧空 pattern 静默重写为 *，不重复提示。"""
+    local = tmp_path / "local.yaml"
+    local.write_text(
+        "rules:\n  - tool: resolve-library-id\n    pattern: ''\n    action: allow\n",
+        encoding="utf-8",
+    )
+    rs = RuleSet()
+    rs.load_from([], local)
+    rs.append_to_local_file(Rule("run_command", "git status", Action.ALLOW))
+    assert capsys.readouterr().err == ""
+    data = yaml.safe_load(local.read_text(encoding="utf-8"))
+    assert data["rules"][0]["pattern"] == "*"  # 旧空 pattern 已自愈
+    assert data["rules"][1]["pattern"] == "git status"
+
+
+def test_load_from_none_pattern_raises(tmp_path):
+    """ch10 F3：pattern 键缺失（None）仍报错。"""
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        "rules:\n  - tool: run_command\n    pattern:\n    action: allow\n",
+        encoding="utf-8",
+    )
+    rs = RuleSet()
+    with pytest.raises(ConfigError, match="pattern 无效"):
+        rs.load_from([bad], tmp_path / "local.yaml")
+
+
+def test_load_from_non_string_pattern_raises(tmp_path):
+    """ch10 F3：pattern 非字符串仍报错，信息可定位。"""
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        "rules:\n  - tool: run_command\n    pattern: 123\n    action: allow\n",
+        encoding="utf-8",
+    )
+    rs = RuleSet()
+    with pytest.raises(ConfigError, match="pattern 无效"):
+        rs.load_from([bad], tmp_path / "local.yaml")

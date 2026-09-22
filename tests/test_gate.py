@@ -2,7 +2,7 @@
 
 import pytest
 
-from mewcode.permissions import Action, Mode, PermissionGate, Rule, RuleSet
+from mewcode.permissions import Action, Mode, PermissionGate, Rule, RuleSet, exact_rule
 from mewcode.provider.base import ToolCall
 from mewcode.tools import create_registry
 
@@ -160,3 +160,22 @@ def test_mode_labels(root):
     assert MODE_LABELS[Mode.STRICT] == "严格"
     assert MODE_LABELS[Mode.DEFAULT] == "默认"
     assert MODE_LABELS[Mode.ACCEPT] == "放行"
+
+
+# ---------------------------------------------------------------------------
+# exact_rule 的 pattern 取值（ch10 F1）
+# ---------------------------------------------------------------------------
+
+
+def test_exact_rule_mcp_tool_star():
+    """MCP 工具无参数级 pattern 概念，规则 pattern 取 *。"""
+    rule = exact_rule(
+        "resolve-library-id", {"libraryName": "Eino", "query": "x"}, Action.ALLOW
+    )
+    assert rule.pattern == "*"
+
+
+def test_exact_rule_run_command_exact():
+    """内置工具保持精确命令串，不受 ch10 改动影响。"""
+    rule = exact_rule("run_command", {"command": "git status"}, Action.ALLOW)
+    assert rule.pattern == "git status"
