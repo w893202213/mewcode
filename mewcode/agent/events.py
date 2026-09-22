@@ -61,6 +61,23 @@ class ProgressEvent:
     iteration: int
 
 
+@dataclass
+class CompressEvent:
+    """上下文压缩事件（ch09 F7）：压缩全程对用户可见。
+
+    kind 取值：
+    - prevent：轻量预防，一个工具结果已存盘（message 含路径）
+    - summarize_start / summarize_done / summarize_failed：重量兜底三态
+    - breaker：摘要已熔断，自动压缩不再发起
+    """
+
+    kind: str
+    message: str  # 中文提示（TUI 直接展示）
+    path: str | None = None  # prevent：存盘路径
+    compacted_messages: int = 0  # summarize_done：被摘要掉的消息条数
+    est_saved_tokens: int = 0  # summarize_done：估算节省 token
+
+
 class RoundEndReason(Enum):
     """轮次结束原因（spec F2 五种停止条件）。"""
 
@@ -88,5 +105,6 @@ AgentEvent = (
     | PermissionAskEvent
     | UsageEvent
     | ProgressEvent
+    | CompressEvent
     | RoundEnd
 )
