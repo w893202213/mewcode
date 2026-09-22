@@ -16,17 +16,18 @@ class CommandResult(Enum):
 
 
 # 可用命令列表（供补全与 /help 展示）
-COMMAND_NAMES = ["/exit", "/clear", "/help", "/plan", "/do", "/mode"]
+COMMAND_NAMES = ["/exit", "/clear", "/help", "/plan", "/do", "/mode", "/compact"]
 
 _HELP_TEXT = "\n".join(
     [
         "可用命令：",
-        "  /exit   退出 MewCode",
-        "  /clear  清空对话上下文，重新开始",
-        "  /help   显示本帮助",
-        "  /plan   进入计划模式：仅只读工具可用，模型先调研并给出计划",
-        "  /do     退出计划模式：切回全部工具，按计划执行",
-        "  /mode   循环切换权限档位：严格 → 默认 → 放行",
+        "  /exit     退出 MewCode",
+        "  /clear    清空对话上下文，重新开始",
+        "  /help     显示本帮助",
+        "  /plan     进入计划模式：仅只读工具可用，模型先调研并给出计划",
+        "  /do       退出计划模式：切回全部工具，按计划执行",
+        "  /mode     循环切换权限档位：严格 → 默认 → 放行",
+        "  /compact  压缩对话上下文：较早的消息生成摘要，近期消息原文保留",
         "输入历史可用上下方向键回溯。",
     ]
 )
@@ -68,4 +69,7 @@ def handle_command(
             f"权限模式已切换为「{MODE_LABELS[new_mode]}」（{new_mode.value}）。"
             "再次输入 /mode 切换下一档。"
         )
+    if command == "/compact":
+        # ch09 F5：无条件执行重量兜底压缩（同步，摘要期间输入阻塞可接受）
+        return CommandResult.CONTINUE, agent.compact_now()
     return CommandResult.CONTINUE, f"未知命令: {command}（输入 /help 查看可用命令）"
