@@ -104,3 +104,116 @@ def test_agent_memory_loader_injected_into_system_prompt():
     asyncio.run(go())
     assert any("【记忆】" in s.dynamic for s in systems)
     assert any("- [a](a.md)" in s.dynamic for s in systems)
+
+
+# ---- T11: MemoryContext 装配 ----
+
+import json
+import os
+import time
+
+
+def _ctx(tmp_path, resume=None):
+    from mewcode.memory import build_memory_context
+
+    return build_memory_context(tmp_path / "proj", tmp_path / "home", resume)
+
+
+def _write_session_file(tmp_path, session_id, lines):
+    sessions = tmp_path / "proj" / ".mewcode" / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    (sessions / f"{session_id}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+
+def test_build_context_new_session(tmp_path):
+    ctx = _ctx(tmp_path)
+    assert ctx.session.messages == []
+    assert "新会话" in ctx.resume_summary
+    assert ctx.log.path.name.endswith(".jsonl")
+    assert ctx.log.path.exists()
+
+
+def test_build_context_resume_by_id(tmp_path):
+    _write_session_file(
+        tmp_path,
+        "20260922-101010-abcd",
+        [
+            '{"type": "user", "text": "旧问题", "ts": %f}' % (time.time() - 60),
+            '{"type": "assistant", "text": "旧回答", "ts": %f}' % (time.time() - 59),
+        ],
+    )
+    ctx = _ctx(tmp_path, resume="20260922-101010-abcd")
+    assert [m.text for m in ctx.session.messages] == ["旧问题", "旧回答"]
+    assert "已恢复会话 20260922-101010-abcd" in ctx.resume_summary
+    assert "2 条消息" in ctx.resume_summary
+    assert ctx.log.path.name == "20260922-101010-abcd.jsonl"
+    # 恢复后继续追加同一文件
+    ctx.log.append_messages([Message(role="user", text="新消息")], time.time())
+    ctx.log.close()
+    lines = ctx.log.path.read_text().splitlines()
+    assert len(lines) == 3
+
+
+def test_build_context_resume_recent_when_empty_arg(tmp_path):
+    _write_session_file(
+        tmp_path,
+        "20260922-101010-aaaa",
+        ['{"type": "user", "text": "最近的问题", "ts": %f}' % (time.time() - 30)],
+    )
+    ctx = _ctx(tmp_path, resume="")
+    assert ctx.session.messages[0].text == "最近的问题"
+    assert "已恢复会话 20260922-101010-aaaa" in ctx.resume_summary
+
+
+def test_build_context_resume_inserts_gap_notice(tmp_path):
+    _write_session_file(
+        tmp_path,
+        "20260922-101010-bbbb",
+        ['{"type": "user", "text": "8 天前的问题", "ts": %f}' % (time.time() - 8 * 86400)],
+    )
+    ctx = _ctx(tmp_path, resume="20260922-101010-bbbb")
+    assert len(ctx.session.messages) == 2  # 原消息 + 时间跨度提醒
+    assert "时间跨度提醒" in ctx.session.messages[-1].text
+    assert "时间跨度提醒" in ctx.resume_summary
+
+
+def test_build_context_resume_invalid_id_falls_back(tmp_path):
+    ctx = _ctx(tmp_path, resume="20260922-000000-zzzz")
+    assert ctx.session.messages == []
+    assert "不存在" in ctx.resume_summary
+    assert "新会话" in ctx.resume_summary
+
+
+def test_build_context_resume_empty_file_falls_back(tmp_path):
+    _write_session_file(tmp_path, "20260922-101010-cccc", ["坏行不是 JSON"])
+    ctx = _ctx(tmp_path, resume="20260922-101010-cccc")
+    assert ctx.session.messages == []
+    assert "无有效记录" in ctx.resume_summary
+
+
+def test_build_context_cleanup_expired_noted(tmp_path):
+    _write_session_file(tmp_path, "20260922-101010-old1", ['{"type": "user", "text": "旧", "ts": 1.0}'])
+    old_path = tmp_path / "proj" / ".mewcode" / "sessions" / "20260922-101010-old1.jsonl"
+    old_time = time.time() - 40 * 86400
+    os.utime(old_path, (old_time, old_time))
+    ctx = _ctx(tmp_path)
+    assert "已清理 1 个过期会话存档" in ctx.resume_summary
+    assert not old_path.exists()
+
+
+def test_memory_loader_reads_indexes(tmp_path):
+    user_mem = tmp_path / "home" / "memory"
+    proj_mem = tmp_path / "proj" / ".mewcode" / "memory"
+    user_mem.mkdir(parents=True)
+    proj_mem.mkdir(parents=True)
+    (user_mem / "index.md").write_text("- [a](a.md) — 用户记忆", encoding="utf-8")
+    (proj_mem / "index.md").write_text("- [b](b.md) — 项目记忆", encoding="utf-8")
+    ctx = _ctx(tmp_path)
+    text = ctx.memory_loader()
+    assert "## 用户级记忆" in text and "用户记忆" in text
+    assert "## 项目级记忆" in text and "项目记忆" in text
+
+
+def test_memory_loader_missing_indexes_returns_empty(tmp_path):
+    ctx = _ctx(tmp_path)
+    assert ctx.memory_loader() == ""

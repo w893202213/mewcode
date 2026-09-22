@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import random
 import string
 import time
@@ -66,7 +67,15 @@ class SessionLog:
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self._file = path.open("a", encoding="utf-8")  # 追加模式，不截断
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # a+ 追加模式打开（不截断，可读）；文件非空且末尾无换行（手工
+        # 编辑或崩溃尾巴）时先补一个换行——否则新行与残行粘连成坏行丢数据
+        self._file = path.open("a+", encoding="utf-8")
+        self._file.seek(0, os.SEEK_END)
+        if self._file.tell() > 0:
+            self._file.seek(self._file.tell() - 1)
+            if self._file.read(1) != "\n":
+                self._file.write("\n")
 
     def append_messages(self, messages: list[Message], ts: float) -> None:
         """逐条消息写一行 JSON 并 flush（崩溃最多丢最后一行）。"""
@@ -158,7 +167,8 @@ class SessionStore:
         self.directory = directory
         directory.mkdir(parents=True, exist_ok=True)
 
-    def _path(self, session_id: str) -> Path:
+    def path(self, session_id: str) -> Path:
+        """会话 ID → 存档文件路径。"""
         return self.directory / f"{session_id}.jsonl"
 
     def new_log(self) -> tuple[str, SessionLog]:
@@ -166,7 +176,7 @@ class SessionStore:
         for _ in range(10):
             suffix = "".join(random.choices(_ID_CHARS, k=4))
             session_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{suffix}"
-            path = self._path(session_id)
+            path = self.path(session_id)
             if not path.exists():
                 return session_id, SessionLog(path)
         raise RuntimeError("无法生成不冲突的会话 ID")
@@ -177,7 +187,7 @@ class SessionStore:
         先解析收集（消息, ts）记录，再在记录层做配平截断，最后统一
         折算 messages 与 last_ts——截断回滚时时间自然跟着回滚。
         """
-        path = self._path(session_id)
+        path = self.path(session_id)
         if not path.exists():
             raise FileNotFoundError(f"会话存档不存在: {path}")
         records: list[tuple[Message, float | None]] = []
