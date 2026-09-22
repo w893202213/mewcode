@@ -40,6 +40,14 @@ from mewcode.agent.events import (
     UsageEvent,
 )
 from mewcode.config import ProviderConfig
+from mewcode.memory import (
+    PROJECT_MEMORY_DIR,
+    USER_MEMORY_DIR,
+    MemoryContext,
+    NoteManager,
+    NoteUpdater,
+)
+from mewcode.memory.sessions import SessionLog, maybe_add_time_gap_notice
 from mewcode.permissions import MODE_LABELS, Action, Mode, PermissionGate, RuleSet, exact_rule
 from mewcode.provider.base import Provider
 from mewcode.session import ChatSession
@@ -60,15 +68,22 @@ _DISPLAY_RESULT_CHARS = 2000
 _CANCEL_DRAIN_TIMEOUT = 5.0
 
 
-def _print_welcome(console: Console, config: ProviderConfig, gate: PermissionGate) -> None:
-    """打印欢迎语（含配置名与模型，绝不回显 api_key）。"""
+def _print_welcome(
+    console: Console,
+    config: ProviderConfig,
+    gate: PermissionGate,
+    resume_summary: str = "",
+) -> None:
+    """打印欢迎语（含配置名与模型，绝不回显 api_key）；ch11：恢复信息行。"""
     lines = [
         f"配置: [bold]{config.name}[/bold]（协议 {config.protocol}）",
         f"模型: {config.model}",
         f"思考模式: {'开启' if config.thinking else '关闭'}",
         f"权限模式: {MODE_LABELS[gate.mode]}（{gate.mode.value}，/mode 切换）",
-        "输入 /help 查看可用命令。",
     ]
+    if resume_summary:
+        lines.append(resume_summary)
+    lines.append("输入 /help 查看可用命令。")
     console.print(
         Panel("\n".join(lines), title=f"[bold]MewCode v{__version__}[/bold]", border_style="cyan")
     )
@@ -80,12 +95,18 @@ def run(
     registry: ToolRegistry,
     custom_instructions: str = "",
     gate: PermissionGate | None = None,
+    memory: MemoryContext | None = None,
 ) -> None:
-    """TUI 主循环：读输入 → 命令或 Agent Loop → 回到输入。"""
+    """TUI 主循环：读输入 → 命令或 Agent Loop → 回到输入。
+
+    memory（ch11）：记忆上下文——会话存档、索引加载器、笔记更新器；
+    为 None 时按纯内存会话运行（测试/嵌入场景，行为与 ch10 一致）。
+    """
     if gate is None:
         # 缺省闸门（与 Agent 缺省一致）：项目根=cwd、默认档、空规则
         gate = PermissionGate(Path.cwd().resolve(), RuleSet(), Mode.DEFAULT)
-    session = ChatSession()
+    root = Path.cwd().resolve()
+    session = memory.session if memory is not None else ChatSession()
     agent = Agent(
         provider,
         registry,
@@ -93,7 +114,18 @@ def run(
         custom_instructions=custom_instructions,
         gate=gate,
         context_window=config.context_window,  # ch09 F1
+        memory_loader=memory.memory_loader if memory is not None else None,
     )
+    # ch11 F5：轮自然结束后异步更新记忆；提示经队列送回主线程打印
+    notice_queue: queue.Queue[str] = queue.Queue()
+    updater: NoteUpdater | None = None
+    if memory is not None:
+        updater = NoteUpdater(
+            provider,
+            project=NoteManager(root / PROJECT_MEMORY_DIR),
+            user=NoteManager(Path.home() / ".mewcode" / USER_MEMORY_DIR),
+            notice=notice_queue.put,
+        )
 
     # 双击 Ctrl+C 判定：第一次提示（不清行），3 秒内第二次退出
     tracker = DoublePressTracker()
@@ -121,7 +153,7 @@ def run(
     # patch_stdout(raw=True)：Rich 输出与 prompt_toolkit 输入行共存
     with patch_stdout(raw=True):
         console = Console()
-        _print_welcome(console, config, gate)
+        _print_welcome(console, config, gate, memory.resume_summary if memory else "")
 
         while True:
             try:
@@ -133,8 +165,17 @@ def run(
                 return
             if text is ExitSignal.EXIT:
                 return  # 双击 Ctrl+C：正常退出，回到 CLI
+            # ch11：先打印上轮异步笔记更新的提示（若有），再处理本次输入
+            _drain_notices(console, notice_queue)
             text = text.strip()
             if not text:
+                continue
+            if text == "/resume":
+                # ch11 F3：多步交互（列表 → 选编号 → 恢复），在界面层就地处理
+                if memory is None:
+                    console.print("记忆系统未启用，无法恢复会话。")
+                else:
+                    _resume_flow(console, memory, agent)
                 continue
             if text.startswith("/"):
                 result, feedback = handle_command(text, session, agent)
@@ -142,17 +183,36 @@ def run(
                 if result is CommandResult.EXIT:
                     return
                 continue
-            _agent_round(console, agent, text, tracker, gate)
+            _agent_round(
+                console,
+                agent,
+                text,
+                tracker,
+                gate,
+                session,
+                memory.log if memory is not None else None,
+                updater,
+            )
 
 
 def _agent_round(
-    console: Console, agent: Agent, text: str, tracker: DoublePressTracker, gate: PermissionGate
+    console: Console,
+    agent: Agent,
+    text: str,
+    tracker: DoublePressTracker,
+    gate: PermissionGate,
+    session: ChatSession,
+    log: SessionLog | None,
+    updater: NoteUpdater | None,
 ) -> None:
     """一轮 Agent Loop：后台跑 Agent，主线程消费事件渲染（F9）。
 
     用户消息不回显：prompt_toolkit 输入行已留在终端滚动区，问题天然可见。
     Ctrl+C 取消循环（已完成步骤保留）；取消后继续排空队列直到 RoundEnd。
+    结束后（ch11 F2/F5）：本轮新增消息追加落盘 JSONL；自然结束（OK）
+    时触发异步笔记更新（busy 时内部跳过，不阻塞输入）。
     """
+    start_index = len(session.messages)
     q = run_in_background(agent, text)
     # 助手回复前缀独立成行，事件流内容渲染在它下方
     console.print(_ASSISTANT_PREFIX)
@@ -170,6 +230,81 @@ def _agent_round(
     if end is None:
         end = RoundEnd(RoundEndReason.CANCELLED, "已取消")
     _print_end(console, usage, end)
+    # ch11：落盘本轮新增消息（ERROR 已被 Agent 回滚，此处只含完整轮次）
+    if log is not None:
+        new_messages = session.messages[start_index:]
+        if new_messages:
+            log.append_messages(new_messages, time.time())
+        if end.reason is RoundEndReason.OK and updater is not None:
+            updater.submit(session.messages)
+
+
+def _drain_notices(console: Console, notice_queue: queue.Queue) -> None:
+    """打印积压的异步提示（记忆更新等）：主线程在 prompt 返回后调用，无并发问题。"""
+    while True:
+        try:
+            notice = notice_queue.get_nowait()
+        except queue.Empty:
+            return
+        console.print(Text(notice, style=_TIMER_STYLE))
+
+
+def _resume_flow(console: Console, memory: MemoryContext, agent: Agent) -> None:
+    """/resume 交互：列出最近 5 个会话 → 选编号 → 恢复（ch11 F3）。
+
+    恢复 = 替换会话内容 + 切换日志句柄 + 时间跨度提醒 + 超限先压一次。
+    恢复后 estimator 未锚定无需处理：首次请求自动锚定（ch09 F2）。
+    """
+    summaries = memory.store.list_recent(5)
+    if not summaries:
+        console.print("没有可恢复的会话。")
+        return
+    lines = ["编号  标题  会话 ID  消息数  最后活动"]
+    for i, s in enumerate(summaries, start=1):
+        mtime = time.strftime("%m-%d %H:%M", time.localtime(s.mtime))
+        lines.append(f"  {i}.   {s.title}  {s.id}  {s.message_count} 条  {mtime}")
+    console.print(Panel("\n".join(lines), title="[bold]最近会话[/bold]", border_style="cyan"))
+    while True:
+        try:
+            answer = prompt("选择编号（回车取消）> ")
+        except EOFError:
+            return
+        answer = answer.strip()
+        if not answer:
+            return
+        if not answer.isdigit() or not (1 <= int(answer) <= len(summaries)):
+            console.print("请输入列表中的编号（回车取消）。")
+            continue
+        break
+    summary = summaries[int(answer) - 1]
+    try:
+        result = memory.store.load(summary.id)
+    except FileNotFoundError:
+        console.print(Text(f"会话 {summary.id} 的存档已不存在。", style=_TIMER_STYLE))
+        return
+    if not result.messages:
+        console.print(Text(f"会话 {summary.id} 无有效记录，无法恢复。", style=_TIMER_STYLE))
+        return
+    memory.session.restore(result.messages)
+    if maybe_add_time_gap_notice(memory.session.messages, result.last_ts, time.time()):
+        console.print(Text("该会话已超过 7 天，已插入时间跨度提醒。", style=_TIMER_STYLE))
+    memory.log.close()
+    memory.log = SessionLog(memory.store.path(summary.id))
+    title = result.title or "（无标题）"
+    console.print(
+        f"已恢复会话 {summary.id}（{title}，{len(result.messages)} 条消息）。"
+    )
+    if result.skipped_lines:
+        console.print(
+            Text(f"跳过 {result.skipped_lines} 行无法解析的记录。", style=_TIMER_STYLE)
+        )
+    if result.truncated:
+        console.print(
+            Text("发现未写完的对话尾巴，已截断至最后一个完整轮次。", style=_TIMER_STYLE)
+        )
+    feedback = agent.maybe_compact_on_restore()
+    if feedback:
+        console.print(Text(feedback, style=_TIMER_STYLE))
 
 
 def _consume_events(
