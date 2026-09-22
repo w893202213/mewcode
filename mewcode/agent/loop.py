@@ -26,13 +26,12 @@ from mewcode.agent.events import (
     UsageEvent,
 )
 from mewcode.agent.executor import execute_call
-from mewcode.context import (
-    Compressor,
-    ResultStore,
-    StoreError,
-    SummarizeError,
-    TokenEstimator,
-)
+# 注意：从子模块导入而非 mewcode.context 包级——包级导入 Compressor
+# 会经 agent.events 反向触发循环依赖（见 context/__init__.py 说明）
+from mewcode.context.compressor import Compressor
+from mewcode.context.estimator import TokenEstimator
+from mewcode.context.prompts import SummarizeError
+from mewcode.context.store import ResultStore, StoreError
 from mewcode.provider.base import (
     Done,
     Provider,
