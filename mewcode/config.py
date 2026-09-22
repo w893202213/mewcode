@@ -25,6 +25,7 @@ class ProviderConfig:
     base_url: str  # 请求地址
     api_key: str  # 认证密钥（绝不打印回显）
     thinking: bool = False  # 是否启用扩展思考
+    context_window: int = 200000  # 上下文窗口上限（token 数，ch09 F1；缺省 200K）
 
 
 def load_config(path: str | os.PathLike) -> list[ProviderConfig]:
@@ -75,6 +76,10 @@ def load_config(path: str | os.PathLike) -> list[ProviderConfig]:
         thinking = item.get("thinking", False)
         if not isinstance(thinking, bool):
             raise ConfigError(f"第 {i} 份配置的 thinking 必须是布尔值 (true/false)")
+        # 上下文窗口上限：正整数；注意排除 bool（isinstance(True, int) 为真）
+        context_window = item.get("context_window", 200000)
+        if isinstance(context_window, bool) or not isinstance(context_window, int) or context_window <= 0:
+            raise ConfigError(f"第 {i} 份配置的 context_window 必须是正整数（token 数）")
         configs.append(
             ProviderConfig(
                 name=item["name"].strip(),
@@ -83,6 +88,7 @@ def load_config(path: str | os.PathLike) -> list[ProviderConfig]:
                 base_url=item["base_url"].strip().rstrip("/"),
                 api_key=item["api_key"].strip(),
                 thinking=thinking,
+                context_window=context_window,
             )
         )
     return configs

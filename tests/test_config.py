@@ -70,6 +70,23 @@ def test_thinking_must_be_bool(tmp_path):
         load_config(path)
 
 
+def test_context_window_defaults_200k(tmp_path):
+    path = _write(tmp_path, [FULL])  # 无 context_window 字段
+    assert load_config(path)[0].context_window == 200000
+
+
+def test_context_window_explicit(tmp_path):
+    path = _write(tmp_path, [{**FULL, "context_window": 1000000}])
+    assert load_config(path)[0].context_window == 1000000
+
+
+@pytest.mark.parametrize("bad", [0, -5, "abc", True])
+def test_context_window_must_be_positive_int(tmp_path, bad):
+    path = _write(tmp_path, [{**FULL, "context_window": bad}])
+    with pytest.raises(ConfigError, match="context_window"):
+        load_config(path)
+
+
 def test_missing_file(tmp_path):
     with pytest.raises(ConfigError, match="不存在"):
         load_config(str(tmp_path / "nope.yaml"))
