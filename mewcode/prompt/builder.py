@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import datetime
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from mewcode.provider.base import SystemPrompt
@@ -81,16 +82,41 @@ def build_custom_block(custom_instructions: str) -> str:
     return f"【自定义指令】\n{text}"
 
 
-class SystemPromptBuilder:
-    """拼装一次请求的系统提示。构造时固定 env 与自定义指令；每次 build 现取日期。"""
+def build_memory_block(memory_text: str) -> str:
+    """记忆块；空内容返回空串（ch11 F5）。"""
+    text = memory_text.strip()
+    if not text:
+        return ""
+    return f"【记忆】\n{text}"
 
-    def __init__(self, env: Environment, custom_instructions: str = "") -> None:
+
+class SystemPromptBuilder:
+    """拼装一次请求的系统提示。构造时固定 env 与自定义指令；每次 build 现取日期。
+
+    memory_loader（ch11）：可选的回调，每次 build 调用以现取记忆索引文本——
+    本轮新产生的笔记下一轮即可见；索引变化只影响 dynamic，不打断 stable 缓存。
+    """
+
+    def __init__(
+        self,
+        env: Environment,
+        custom_instructions: str = "",
+        memory_loader: Callable[[], str] | None = None,
+    ) -> None:
         self._env = env
         self._custom_block = build_custom_block(custom_instructions)
+        self._memory_loader = memory_loader
 
     def build(self, directives: list[SwitchDirective], iteration: int) -> SystemPrompt:
-        """返回 SystemPrompt：stable=七模块；dynamic=补充块+自定义指令块。"""
+        """返回 SystemPrompt：stable=七模块；dynamic=补充块+记忆块+自定义指令块。"""
         directive_texts = [d.text_for(iteration) for d in directives]
         supplement = build_supplement(self._env, directive_texts)
-        dynamic = "\n\n".join(p for p in (supplement, self._custom_block) if p)
+        memory_block = (
+            build_memory_block(self._memory_loader())
+            if self._memory_loader is not None
+            else ""
+        )
+        dynamic = "\n\n".join(
+            p for p in (supplement, memory_block, self._custom_block) if p
+        )
         return SystemPrompt(stable=STABLE_TEXT, dynamic=dynamic)

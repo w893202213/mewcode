@@ -11,7 +11,7 @@ import asyncio
 import os
 import platform
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 from mewcode.agent.collector import StreamCollector
@@ -139,6 +139,7 @@ class Agent:
         gate: PermissionGate | None = None,
         context_window: int = 200000,  # 上下文窗口上限（ch09 F1）
         context_dir: Path | None = None,  # 工具结果存盘目录（ch09 F3，缺省启动目录/.mewcode/context）
+        memory_loader: Callable[[], str] | None = None,  # 记忆索引加载器（ch11 F5，每轮现取）
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -156,10 +157,11 @@ class Agent:
         # 挂起的权限询问 (future, 事件循环)；无询问时为 None
         self._pending: tuple[asyncio.Future, asyncio.AbstractEventLoop] | None = None
         # 系统提示拼装器：环境快照（启动目录+平台）构造时采样，日期每次 build 现取；
-        # 自定义指令来自配置（可选）
+        # 自定义指令来自配置（可选）；记忆索引每轮现取（ch11）
         self._builder = SystemPromptBuilder(
             Environment(cwd=_safe_cwd(), platform=platform.platform()),
             custom_instructions=custom_instructions,
+            memory_loader=memory_loader,
         )
         # ch09：上下文管理——估算器、存盘器、压缩器；存盘目录不可用时降级
         # 为恒失败 store，prevent 静默降级、不阻断请求（N6）
@@ -256,6 +258,25 @@ class Agent:
         return (
             f"已压缩上下文：{result.compacted_messages} 条消息生成摘要，"
             f"{result.kept_user_messages} 条用户消息原文保留，"
+            f"估算节省 {result.est_saved_tokens} token。"
+        )
+
+    def maybe_compact_on_restore(self) -> str | None:
+        """恢复会话后检查 token 是否超限，超限先压一次（ch11 F3）。
+
+        沿用 ch09 自动口径触发（needs_auto），执行自动模式摘要；
+        无需压缩返回 None；压缩失败返回错误文本（不抛出）。
+        """
+        system = self._builder.build([], 1)
+        if not self._compressor.needs_auto(self._session.messages, system):
+            return None
+        try:
+            result = self._compressor.summarize(self._session, manual=False)
+        except SummarizeError as e:
+            return f"恢复后压缩失败: {e}"
+        return (
+            f"恢复的会话 token 超限，已先压缩一次：{result.compacted_messages} 条消息"
+            f"生成摘要，{result.kept_user_messages} 条用户消息原文保留，"
             f"估算节省 {result.est_saved_tokens} token。"
         )
 

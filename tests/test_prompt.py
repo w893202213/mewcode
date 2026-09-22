@@ -147,3 +147,51 @@ def test_plan_mode_directive_defaults():
     assert PLAN_MODE_DIRECTIVE.full_text
     assert PLAN_MODE_DIRECTIVE.slim_text
     assert "只读" in PLAN_MODE_DIRECTIVE.full_text
+
+
+def test_memory_block_injected_before_custom_block():
+    from mewcode.prompt.builder import Environment, SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        Environment(cwd="/tmp", platform="Linux"),
+        custom_instructions="自定义指令内容",
+        memory_loader=lambda: "## 用户级记忆\n- [a](a.md)",
+    )
+    system = builder.build([], 1)
+    assert "【记忆】" in system.dynamic
+    assert "## 用户级记忆" in system.dynamic
+    assert system.dynamic.index("【记忆】") < system.dynamic.index("【自定义指令】")
+    assert "自定义指令内容" in system.dynamic
+
+
+def test_memory_loader_called_on_every_build():
+    from mewcode.prompt.builder import Environment, SystemPromptBuilder
+
+    calls = {"n": 0}
+
+    def loader():
+        calls["n"] += 1
+        return f"第{calls['n']}次索引"
+
+    builder = SystemPromptBuilder(Environment(cwd="/tmp", platform="Linux"), memory_loader=loader)
+    assert "第1次索引" in builder.build([], 1).dynamic
+    assert "第2次索引" in builder.build([], 2).dynamic  # 每轮现取，变化即时可见
+
+
+def test_memory_loader_empty_hides_block():
+    from mewcode.prompt.builder import Environment, SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        Environment(cwd="/tmp", platform="Linux"), memory_loader=lambda: "  "
+    )
+    system = builder.build([], 1)
+    assert "【记忆】" not in system.dynamic
+
+
+def test_without_memory_loader_unchanged():
+    from mewcode.prompt.builder import Environment, SystemPromptBuilder
+
+    builder = SystemPromptBuilder(Environment(cwd="/tmp", platform="Linux"))
+    system = builder.build([], 1)
+    assert "【记忆】" not in system.dynamic
+    assert "【自定义指令】" not in system.dynamic
