@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -15,6 +14,7 @@ from mewcode.config import (
     select_profile,
 )
 from mewcode.mcp import McpManager, load_mcp_servers
+from mewcode.memory import build_memory_context, load_instructions
 from mewcode.permissions import PermissionGate, RuleSet
 from mewcode.provider import create_provider
 from mewcode.tools import create_registry
@@ -22,6 +22,8 @@ from mewcode.tui.app import run
 
 # 配置文件默认路径
 DEFAULT_CONFIG_PATH = Path.home() / ".mewcode" / "config.yaml"
+# 用户目录（三层指令与用户级记忆的根）
+USER_DIR = Path.home() / ".mewcode"
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -38,6 +40,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--config",
         default=str(DEFAULT_CONFIG_PATH),
         help=f"配置文件路径（缺省 {DEFAULT_CONFIG_PATH}）",
+    )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="SESSION_ID",
+        help="恢复会话：不带 ID 恢复最近一个会话，可指定会话 ID",
     )
     return parser.parse_args(argv)
 
@@ -64,8 +74,9 @@ def _build_gate(config_path: str) -> PermissionGate:
 def main(argv: list[str] | None = None) -> None:
     """入口：配置错误打印到 stderr 并以非零码退出。
 
-    装配顺序（ch08）：providers → 闸门 → 内置工具 → MCP 发现注册
-    （内部警告不抛）→ 规则工具名统一校验 → TUI；退出时统一关闭
+    装配顺序（ch08 + ch11 F6）：providers → 闸门 → 内置工具 → MCP
+    发现注册（内部警告不抛）→ 规则工具名统一校验 → 三层指令加载
+    → 记忆上下文（创建/恢复会话 + 过期清理）→ TUI；退出时统一关闭
     全部 MCP 连接（终止子进程）。
     """
     args = _parse_args(argv)
@@ -91,8 +102,23 @@ def main(argv: list[str] | None = None) -> None:
         manager.shutdown()  # 清理已启动的 MCP 连接
         sys.exit(1)
 
-    custom_instructions = load_custom_instructions(args.config)
+    # ch11 F1：三层指令加载（警告不阻断），config 字段作为用户级最末段
+    project_root = Path.cwd().resolve()
+    instructions = load_instructions(project_root, USER_DIR)
+    for warning in instructions.warnings:
+        print(f"警告: {warning}", file=sys.stderr)
+    custom_instructions = "\n\n".join(
+        p
+        for p in (instructions.text, load_custom_instructions(args.config))
+        if p.strip()
+    )
+
+    # ch11 F6：记忆上下文（会话创建/恢复 + 过期清理）
+    memory = build_memory_context(project_root, USER_DIR, args.resume)
+    if memory.resume_summary:
+        print(memory.resume_summary)
+
     try:
-        run(provider, config, registry, custom_instructions, gate)
+        run(provider, config, registry, custom_instructions, gate, memory=memory)
     finally:
         manager.shutdown()

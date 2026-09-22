@@ -16,7 +16,7 @@ class CommandResult(Enum):
 
 
 # 可用命令列表（供补全与 /help 展示）
-COMMAND_NAMES = ["/exit", "/clear", "/help", "/plan", "/do", "/mode", "/compact"]
+COMMAND_NAMES = ["/exit", "/clear", "/help", "/plan", "/do", "/mode", "/compact", "/resume"]
 
 _HELP_TEXT = "\n".join(
     [
@@ -28,6 +28,7 @@ _HELP_TEXT = "\n".join(
         "  /do       退出计划模式：切回全部工具，按计划执行",
         "  /mode     循环切换权限档位：严格 → 默认 → 放行",
         "  /compact  压缩对话上下文：较早的消息生成摘要，近期消息原文保留",
+        "  /resume   列出最近会话并恢复其中一个",
         "输入历史可用上下方向键回溯。",
     ]
 )
@@ -72,4 +73,8 @@ def handle_command(
     if command == "/compact":
         # ch09 F5：无条件执行重量兜底压缩（同步，摘要期间输入阻塞可接受）
         return CommandResult.CONTINUE, agent.compact_now()
+    if command == "/resume":
+        # 实际多步交互由 tui/app.py 在主循环拦截处理（ch11 F3），
+        # 此分支仅为防御：走到这里说明界面层没有拦截
+        return CommandResult.CONTINUE, "请使用 /resume 选择要恢复的会话（由界面处理）。"
     return CommandResult.CONTINUE, f"未知命令: {command}（输入 /help 查看可用命令）"
