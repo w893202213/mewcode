@@ -74,6 +74,10 @@ class ChatSession:
         """清空全部历史。"""
         self.messages.clear()
 
+    def restore(self, messages: list[Message]) -> None:
+        """整体替换消息列表（ch11 会话恢复用）；入参拷贝成新 list。"""
+        self.messages = list(messages)
+
     def replace_head(self, end: int, new_messages: list[Message]) -> None:
         """丢弃前 end 条消息，头部换成 new_messages（ch09 压缩重构用）。
 
