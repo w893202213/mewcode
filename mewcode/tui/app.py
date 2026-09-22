@@ -28,6 +28,7 @@ from rich.text import Text
 from mewcode import __version__
 from mewcode.agent import Agent, run_in_background
 from mewcode.agent.events import (
+    CompressEvent,
     PermissionAskEvent,
     ProgressEvent,
     RoundEnd,
@@ -85,7 +86,14 @@ def run(
         # 缺省闸门（与 Agent 缺省一致）：项目根=cwd、默认档、空规则
         gate = PermissionGate(Path.cwd().resolve(), RuleSet(), Mode.DEFAULT)
     session = ChatSession()
-    agent = Agent(provider, registry, session, custom_instructions=custom_instructions, gate=gate)
+    agent = Agent(
+        provider,
+        registry,
+        session,
+        custom_instructions=custom_instructions,
+        gate=gate,
+        context_window=config.context_window,  # ch09 F1
+    )
 
     # 双击 Ctrl+C 判定：第一次提示（不清行），3 秒内第二次退出
     tracker = DoublePressTracker()
@@ -272,6 +280,21 @@ def _consume_events(
                     console.print(Markdown(committed_text))
                 else:
                     render()
+            elif isinstance(event, CompressEvent):
+                # ch09 F7：压缩提示灰色行；轮初压缩时（summarize_*/breaker）重开
+                # Live 承接后续流式渲染，prevent 阶段（live 已关）只打印
+                was_live = live is not None
+                close_live()
+                console.print(Text(event.message, style=_TIMER_STYLE))
+                if was_live:
+                    live = Live(
+                        indicator,
+                        console=console,
+                        refresh_per_second=10,
+                        vertical_overflow="visible",
+                    )
+                    live.start()
+                    render()
             elif isinstance(event, ToolCallStarted):
                 close_live()
                 _print_tool_call(console, event.call)
@@ -313,6 +336,8 @@ def _drain_cancelled(
             _print_tool_call(console, event.call)
         elif isinstance(event, ToolResultEvent):
             _print_tool_result(console, event.result)
+        elif isinstance(event, CompressEvent):
+            console.print(Text(event.message, style=_TIMER_STYLE))
         elif isinstance(event, UsageEvent):
             usage["in"] = event.input_tokens
             usage["out"] = event.output_tokens
