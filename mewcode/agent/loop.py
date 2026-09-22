@@ -16,6 +16,7 @@ from pathlib import Path
 
 from mewcode.agent.collector import StreamCollector
 from mewcode.agent.events import (
+    CompressEvent,
     PermissionAskEvent,
     ProgressEvent,
     RoundEnd,
@@ -25,6 +26,13 @@ from mewcode.agent.events import (
     UsageEvent,
 )
 from mewcode.agent.executor import execute_call
+from mewcode.context import (
+    Compressor,
+    ResultStore,
+    StoreError,
+    SummarizeError,
+    TokenEstimator,
+)
 from mewcode.provider.base import (
     Done,
     Provider,
@@ -61,6 +69,16 @@ def _safe_cwd() -> str:
         return os.getcwd()
     except OSError:
         return "未知"
+
+
+class _FailingStore:
+    """存盘目录不可用时的占位 store：save 恒抛 StoreError，prevent 恒降级（N6）。"""
+
+    def save(self, content: str, seq: int) -> None:
+        raise StoreError("存盘目录不可用")
+
+    def preview(self, content: str, path, head_chars: int) -> str:
+        return content  # save 先抛，此处不会被调到
 
 
 class _Cancelled(Exception):
@@ -120,6 +138,8 @@ class Agent:
         max_iterations: int = MAX_ITERATIONS,
         custom_instructions: str = "",
         gate: PermissionGate | None = None,
+        context_window: int = 200000,  # 上下文窗口上限（ch09 F1）
+        context_dir: Path | None = None,  # 工具结果存盘目录（ch09 F3，缺省启动目录/.mewcode/context）
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -141,6 +161,18 @@ class Agent:
         self._builder = SystemPromptBuilder(
             Environment(cwd=_safe_cwd(), platform=platform.platform()),
             custom_instructions=custom_instructions,
+        )
+        # ch09：上下文管理——估算器、存盘器、压缩器；存盘目录不可用时降级
+        # 为恒失败 store，prevent 静默降级、不阻断请求（N6）
+        self._estimator = TokenEstimator()
+        try:
+            store = ResultStore(
+                context_dir or Path.cwd() / ".mewcode" / "context"
+            )
+        except StoreError:
+            store = _FailingStore()
+        self._compressor = Compressor(
+            provider, self._estimator, store, context_window
         )
 
     def cancel(self) -> None:
@@ -208,6 +240,25 @@ class Agent:
     def plan_mode(self) -> bool:
         """当前是否处于计划模式。"""
         return self._plan_mode
+
+    def compact_now(self) -> str:
+        """/compact 同步入口（ch09 F5）：无条件执行重量兜底，返回中文反馈。
+
+        无视熔断（F6：手动总是允许，成功即解除）。TUI 主线程直接调用——
+        命令只会在输入提示时处理，此时 Agent 循环必然已结束，无并发。
+        """
+        system = self._builder.build([], 1)
+        try:
+            result = self._compressor.summarize(self._session, manual=True)
+        except SummarizeError as e:
+            return f"压缩失败: {e}"
+        if result.compacted_messages == 0:
+            return "上下文较短，无需压缩。"
+        return (
+            f"已压缩上下文：{result.compacted_messages} 条消息生成摘要，"
+            f"{result.kept_user_messages} 条用户消息原文保留，"
+            f"估算节省 {result.est_saved_tokens} token。"
+        )
 
     def _visible_tools(self) -> list[Tool]:
         """本轮发给模型的工具列表：计划模式下收窄为只读工具。"""
@@ -290,6 +341,50 @@ class Agent:
                     [PLAN_MODE_DIRECTIVE] if self._plan_mode else []
                 )
                 system = self._builder.build(directives, iteration)
+                # ch09 F4/F6：请求前检查是否逼近窗口上限——触发重量兜底；
+                # 熔断时提示但不压缩，按未压缩状态继续（N6）
+                if self._compressor.needs_auto(self._session.messages, system):
+                    yield CompressEvent(
+                        kind="summarize_start",
+                        message="正在压缩上下文：较早的消息将生成摘要，近期原文保留…",
+                    )
+                    try:
+                        result = await asyncio.to_thread(
+                            self._compressor.summarize, self._session, False
+                        )
+                        yield CompressEvent(
+                            kind="summarize_done",
+                            message=(
+                                f"已压缩上下文：{result.compacted_messages} 条消息生成摘要，"
+                                f"{result.kept_user_messages} 条用户消息原文保留，"
+                                f"估算节省 {result.est_saved_tokens} token"
+                            ),
+                            compacted_messages=result.compacted_messages,
+                            est_saved_tokens=result.est_saved_tokens,
+                        )
+                    except SummarizeError as e:
+                        yield CompressEvent(
+                            kind="summarize_failed", message=f"压缩失败: {e}"
+                        )
+                        if self._compressor.breaker_open:
+                            # 第 3 次失败：立即告知熔断（可能没有下一轮请求前的检查机会）
+                            yield CompressEvent(
+                                kind="breaker",
+                                message=(
+                                    "摘要已连续失败 3 次（熔断），自动压缩不再发起；"
+                                    "可输入 /compact 手动重试"
+                                ),
+                            )
+                elif self._compressor.breaker_open and self._compressor.over_auto_threshold(
+                    self._session.messages, system
+                ):
+                    yield CompressEvent(
+                        kind="breaker",
+                        message=(
+                            "上下文接近上限，但摘要已连续失败 3 次（熔断），"
+                            "自动压缩不再发起；可输入 /compact 手动重试"
+                        ),
+                    )
                 collector = StreamCollector()
                 calls: list[ToolCall] = []
                 async for event in self._stream_bridged(
@@ -318,6 +413,10 @@ class Agent:
                                 total_cache_write = (
                                     (total_cache_write or 0) + event.usage.cache_write_tokens
                                 )
+                            # ch09 F2：锚定最新 usage——后续估算基于真实值 + 增量差分
+                            self._estimator.anchor(
+                                event.usage.input_tokens, self._session.messages
+                            )
                 # 流结束后立刻检查：取消时不落盘本轮部分响应
                 if self._cancelled_now():
                     raise _Cancelled()
@@ -414,6 +513,12 @@ class Agent:
                             is_error=not result.ok,
                         )
                     )
+                    # ch09 F3：轻量预防——超阈值结果存盘，会话只留预览与路径
+                    prevent_event = self._compressor.prevent(
+                        self._session.messages[-1]
+                    )
+                    if prevent_event is not None:
+                        yield prevent_event
                     yield ToolResultEvent(call, result)
                     # 停止条件④：连续调用未知工具（任何已知工具清零计数）
                     if self._is_unknown(call):

@@ -195,14 +195,16 @@ class Compressor:
 
     # ---- 触发判定与熔断（F4/F6）----
 
-    def needs_auto(self, messages: list[Message], system: SystemPrompt) -> bool:
-        """自动触发判定：估算总量 ≥ 窗口 − 13000 且未熔断。"""
-        if self.breaker_open:
-            return False
+    def over_auto_threshold(self, messages: list[Message], system: SystemPrompt) -> bool:
+        """估算总量 ≥ 窗口 − 13000（不含熔断判断，供调用方组合提示）。"""
         return (
             self._estimator.estimate(messages, system)
             >= self._context_window - self._auto_margin
         )
+
+    def needs_auto(self, messages: list[Message], system: SystemPrompt) -> bool:
+        """自动触发判定：估算总量 ≥ 窗口 − 13000 且未熔断。"""
+        return not self.breaker_open and self.over_auto_threshold(messages, system)
 
     @property
     def breaker_open(self) -> bool:
