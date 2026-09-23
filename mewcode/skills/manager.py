@@ -86,6 +86,10 @@ class SkillManager:
 
     # ---------- 每轮现取的上下文 ----------
 
+    def active_names(self) -> set[str]:
+        """当前激活技能名集合（只读，渲染层查询激活标记用，ch14）。"""
+        return set(self._active)
+
     def active_snapshot(self) -> str:
         """【已激活技能】块：按激活顺序拼装，每轮由系统提示 build 现取。"""
         if not self._active:

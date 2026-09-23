@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from mewcode.commands.builtins import build_registry
+from mewcode.commands.builtins import build_registry, register_skill_command
 from mewcode.commands.registry import CommandConflictError
 from mewcode.config import (
     ConfigError,
@@ -86,7 +86,8 @@ def main(argv: list[str] | None = None) -> None:
 
     装配顺序（ch08 + ch11 F6 + ch12 + ch13）：providers → 闸门 → 内置工具
     → MCP 发现注册（内部警告不抛）→ 规则工具名统一校验 → 命令注册中心
-    （冲突即启动失败）→ 技能发现（警告不阻断）→ use_skill 注册 →
+    （冲突即启动失败）→ 技能发现（警告不阻断）→ /skill 命令注册 →
+    use_skill 注册 →
     白名单启动校验（未知工具即退出）→ 三层指令加载 → 记忆上下文
     （创建/恢复会话 + 过期清理）→ TUI；退出时统一关闭全部 MCP 连接
     （终止子进程）。
@@ -129,6 +130,8 @@ def main(argv: list[str] | None = None) -> None:
     for warning in discovered.warnings:
         print(f"警告: {warning}", file=sys.stderr)
     skill_manager = SkillManager(discovered.skills)
+    # ch14：/skill 列表命令——先占名，技能短命令撞名自然跳过
+    register_skill_command(command_registry, skill_manager)
     registry.register(UseSkillTool(skill_manager))
     problems = validate_whitelists(
         discovered.skills, {tool.name for tool in registry.list()}

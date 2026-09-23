@@ -336,3 +336,78 @@ def test_resume_cancel(registry, ui):
     dispatch(registry, ParsedCommand(name="resume", args=""), ui)
     assert ui.restored == []
     assert ui.displayed == []
+
+
+# ---------- ch14: /skill 技能列表 ----------
+
+from mewcode.skills.model import parse_skill_file
+
+
+def _make_skill(tmp_path, name, description="说明"):
+    """写一个临时技能文件并返回解析后的 Skill。"""
+    path = tmp_path / f"{name}.md"
+    path.write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n正文\n",
+        encoding="utf-8",
+    )
+    skill, error = parse_skill_file(path, "builtin")
+    assert error is None
+    return skill
+
+
+def test_skill_list_empty():
+    assert builtins.render_skill_list({}, set()) == "没有可用技能。"
+
+
+def test_skill_list_no_active(tmp_path):
+    skills = {
+        "a": _make_skill(tmp_path, "a", "说明 A"),
+        "b": _make_skill(tmp_path, "b", "说明 B"),
+    }
+    text = builtins.render_skill_list(skills, set())
+    lines = text.splitlines()
+    assert lines[0] == "可用技能："
+    assert len(lines) == 3  # 无统计行（AC1：无激活时省略）
+    assert "★" not in text
+    assert lines[1].startswith("  ") and "a" in lines[1] and "说明 A" in lines[1]
+    assert lines[2].startswith("  ") and "b" in lines[2] and "说明 B" in lines[2]
+
+
+def test_skill_list_active_marked_with_stats(tmp_path):
+    skills = {
+        "a": _make_skill(tmp_path, "a", "说明 A"),
+        "b": _make_skill(tmp_path, "b", "说明 B"),
+        "c": _make_skill(tmp_path, "c", "说明 C"),
+    }
+    text = builtins.render_skill_list(skills, {"b"})
+    lines = text.splitlines()
+    assert lines[0] == "可用技能："
+    assert lines[-1] == "共 3 个技能，1 个已激活。"
+    assert lines[1].startswith("  ") and "★" not in lines[1]  # a 未激活
+    assert lines[2].startswith("  ★") and "b" in lines[2]  # b 已激活
+    assert lines[3].startswith("  ") and "★" not in lines[3]  # c 未激活
+
+
+def test_skill_list_sorted_and_counts_known_only(tmp_path):
+    skills = {
+        "z": _make_skill(tmp_path, "z", "说明 Z"),
+        "a": _make_skill(tmp_path, "a", "说明 A"),
+    }
+    text = builtins.render_skill_list(skills, {"ghost", "z"})
+    lines = text.splitlines()
+    # 按名排序：a 在 z 前；active 中不在表内的名字不计入统计
+    assert lines[1] < lines[2] and "a" in lines[1]
+    assert lines[-1] == "共 2 个技能，1 个已激活。"
+
+
+def test_skill_command_dispatch_renders_list(tmp_path, registry, ui):
+    """ch14 F1：dispatch /skill → displayed 与 render_skill_list 输出一致。"""
+    from mewcode.commands.builtins import register_skill_command
+    from mewcode.skills.manager import SkillManager
+
+    skills = {"a": _make_skill(tmp_path, "a", "说明 A")}
+    manager = SkillManager(skills)
+    manager.activate("a")
+    register_skill_command(registry, manager)
+    dispatch(registry, ParsedCommand(name="skill", args=""), ui)
+    assert ui.displayed == [builtins.render_skill_list(skills, manager.active_names())]

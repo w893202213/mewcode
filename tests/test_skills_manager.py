@@ -102,6 +102,27 @@ def test_active_snapshot_multiple_skills(tmp_path):
     assert snapshot.index("### a") < snapshot.index("### b")
 
 
+def test_active_names_tracks_activation_and_clear(tmp_path):
+    """ch14：active_names 只读反映激活状态（未激活空集 / 激活出现 / clear 清空）。"""
+    manager = _manager(tmp_path)
+    assert manager.active_names() == set()
+    manager.activate("demo")
+    assert manager.active_names() == {"demo"}
+    manager.clear()
+    assert manager.active_names() == set()
+
+
+def test_active_names_multiple(tmp_path):
+    skills = {
+        "a": _make_skill(tmp_path, "a"),
+        "b": _make_skill(tmp_path, "b"),
+    }
+    manager = SkillManager(skills)
+    manager.activate("a")
+    manager.activate("b")
+    assert manager.active_names() == {"a", "b"}
+
+
 def test_snapshot_includes_skill_dir(tmp_path):
     skill = _make_skill(tmp_path, "pack", dir=tmp_path / "pack")
     manager = SkillManager({"pack": skill})

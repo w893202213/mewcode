@@ -132,3 +132,48 @@ def test_unknown_skill_command_not_registered(tmp_path):
     result = manager.activate("nope")
     assert not result.ok
     assert registry.resolve("nope") is None
+
+
+# ---------- ch14: 内置 /skill 命令 ----------
+
+from mewcode.commands.builtins import register_skill_command
+
+
+def test_register_skill_command_metadata(tmp_path):
+    """ch14 F4：/skill 注册为 LOCAL 内置命令，进可见列表（/help 与补全数据源）。"""
+    registry = _registry()
+    manager = _manager(tmp_path)
+    register_skill_command(registry, manager)
+    spec = registry.resolve("skill")
+    assert spec is not None
+    assert spec.type is CommandType.LOCAL
+    assert spec.usage == "/skill"
+    assert "skill" in [s.name for s in registry.visible()]
+
+
+def test_skill_named_skill_activation_keeps_builtin(tmp_path):
+    """ch14 AC6：技能名撞 /skill → 短命令跳过注册并警告，内置 /skill 不受影响。"""
+    registry = _registry()
+    manager = _manager(tmp_path, name="skill")
+    register_skill_command(registry, manager)
+    manager.attach_registry(registry)
+    manager.activate("skill")
+    assert manager.take_warnings() == ["技能命令 /skill 与内置命令撞名，跳过注册"]
+    # 注册表里只有内置 /skill 一条（技能未覆盖它）
+    specs = [s for s in registry.all() if s.name == "skill"]
+    assert len(specs) == 1
+    assert specs[0].type is CommandType.LOCAL
+
+
+def test_skill_command_displays_list_via_handler(tmp_path):
+    """ch14 F1：dispatch /skill → ui.display 收到技能列表文本（激活状态实时）。"""
+    registry = _registry()
+    manager = _manager(tmp_path)
+    register_skill_command(registry, manager)
+    manager.activate("demo")
+    ui = FakeUi()
+    result = dispatch(registry, ParsedCommand(name="skill", args=""), ui)
+    assert result is CommandResult.CONTINUE
+    assert ui.displayed == [
+        "可用技能：\n  ★ demo         demo 技能说明\n共 1 个技能，1 个已激活。"
+    ]

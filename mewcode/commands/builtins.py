@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Callable
+
 from mewcode.commands.dispatch import CommandResult
 from mewcode.commands.parser import ParsedCommand
 from mewcode.commands.registry import (
@@ -22,6 +24,10 @@ from mewcode.commands.ui import (
     TokenStats,
     UiController,
 )
+from mewcode.skills.model import Skill
+
+if TYPE_CHECKING:
+    from mewcode.skills.manager import SkillManager
 
 _TYPE_LABELS = {
     CommandType.LOCAL: "纯本地",
@@ -110,6 +116,20 @@ def _cmd_resume(cmd: ParsedCommand, ui: UiController) -> CommandResult | None:
 
 # ---------- 文案格式化（纯函数） ----------
 
+def render_skill_list(skills: dict[str, Skill], active: set[str]) -> str:
+    """技能列表文本（ch14 F1）：按名排序，激活技能行首 ★，有激活时附统计行。"""
+    if not skills:
+        return "没有可用技能。"
+    lines = ["可用技能："]
+    for name in sorted(skills):
+        mark = "★ " if name in active else "  "
+        lines.append(f"  {mark}{name:<12} {skills[name].description}")
+    n_active = len(active & set(skills))
+    if n_active:
+        lines.append(f"共 {len(skills)} 个技能，{n_active} 个已激活。")
+    return "\n".join(lines)
+
+
 def _render_help_list(specs: list[CommandSpec]) -> str:
     """全部可见命令列表（名称 + 描述 + 别名）。"""
     lines = ["可用命令："]
@@ -197,6 +217,36 @@ def _format_permission(info: PermissionInfo) -> str:
 
 
 # ---------- 注册构建 ----------
+
+def make_skill_handler(manager: "SkillManager") -> Callable[
+    [ParsedCommand, UiController], CommandResult | None
+]:
+    """/skill 命令处理器（ch14）：闭包捕获技能管理器，现取技能表与激活状态。
+
+    与 /help 闭包捕获注册中心同模式；每次执行时现取，激活/清空后天然实时。
+    """
+
+    def cmd_skill(cmd: ParsedCommand, ui: UiController) -> CommandResult | None:
+        ui.display(render_skill_list(manager.skills, manager.active_names()))
+        return None
+
+    return cmd_skill
+
+
+def register_skill_command(
+    registry: CommandRegistry, manager: "SkillManager"
+) -> None:
+    """登记 /skill 命令（ch14 F4）；须技能管理器创建后调用（cli 装配层）。"""
+    registry.register(
+        CommandSpec(
+            name="skill",
+            description="列出全部可用技能与激活状态",
+            usage="/skill",
+            type=CommandType.LOCAL,
+            handler=make_skill_handler(manager),
+        )
+    )
+
 
 def register_builtins(registry: CommandRegistry) -> None:
     """登记 12 条内置命令；/help 经闭包捕获注册中心动态渲染。"""
