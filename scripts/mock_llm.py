@@ -15,6 +15,10 @@
   - "never-stop-model"  → 每轮调用 read_file（触发迭代上限）
 - ch08 MCP e2e：
   - "mcp-model"         → 第一轮调用 MCP 工具 add（1+2），回灌后出最终文本
+- ch13 技能 e2e（skill-commit-model，按请求内容分阶段）：
+  主对话无技能 → 调 use_skill(commit)；有 use_skill 结果 → 收手结束本轮
+  （触发独立执行）；独立对话（系统含【已激活技能】）→ git status 后出
+  最终文本；摘要回流后的主对话 → 汇报文本
 
 收到的请求体会以 JSON 行追加写入 ./mock_requests.log，供检查 thinking 透传等字段。
 """
@@ -133,6 +137,49 @@ def _anthropic_tool_result_count(body: dict) -> int:
                 1 for b in content if isinstance(b, dict) and b.get("type") == "tool_result"
             )
     return count
+
+
+def _anthropic_has_tool_result_containing(body: dict, needle: str) -> bool:
+    """ch13 e2e：请求体中是否存在含指定文本的工具结果（判断技能加载阶段）。"""
+    for m in body.get("messages", []):
+        content = m.get("content")
+        if isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    if needle in str(b.get("content", "")):
+                        return True
+    return False
+
+
+def _anthropic_system_text(body: dict) -> str:
+    """ch13 e2e：系统提示全文（Anthropic 的 system 可能是字符串或块列表）。"""
+    system = body.get("system", "")
+    if isinstance(system, list):
+        return " ".join(
+            b.get("text", "")
+            for b in system
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return str(system)
+
+
+def _anthropic_last_user_text(body: dict) -> str:
+    """ch13 e2e：最后一条 user 消息的文本内容（判断摘要回流阶段）。"""
+    for m in reversed(body.get("messages", [])):
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = [
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            if parts:
+                return "".join(parts)
+    return ""
 
 
 def _anthropic_message_start(body: dict) -> str:
@@ -562,6 +609,57 @@ class MockHandler(BaseHTTPRequestHandler):
                     )
                 else:
                     send(_anthropic_text_round("**完成！** MCP 工具链可用，结果已回灌。"))
+            elif has_tools and model == "skill-commit-model":
+                # ch13 e2e：commit 技能全流程（独立模式）——
+                # 主对话无技能 → 调 use_skill(commit)；主对话有 use_skill 结果
+                # → 收手结束本轮（触发独立执行）；独立对话（系统含【已激活技能】）
+                # → 跑 git 流程后出最终文本；摘要回流后的主对话 → 汇报文本
+                if "独立执行摘要" in _anthropic_last_user_text(body):
+                    send(_anthropic_text_round("commit 技能执行完毕：改动已提交（摘要已回流）。"))
+                elif _anthropic_has_tool_result_containing(body, "技能 commit 已激活"):
+                    send(_anthropic_text_round("好的，正在执行 commit 技能。"))
+                elif "【已激活技能】" in _anthropic_system_text(body):
+                    if _anthropic_tool_result_count(body) == 0:
+                        send(
+                            _anthropic_tool_round(
+                                "toolu_skill_1", "run_command",
+                                {"command": "git status --short"},
+                                text="我先看看工作区改动。",
+                            )
+                        )
+                    else:
+                        send(_anthropic_text_round("已完成提交：修复登录 bug（提交信息：修复登录 bug）。"))
+                else:
+                    send(
+                        _anthropic_tool_round(
+                            "toolu_skill_0", "use_skill", {"name": "commit"},
+                            text="我用 commit 技能来提交。",
+                        )
+                    )
+            elif has_tools and model == "skill-review-model":
+                # ch13 e2e：review 技能（共享模式）——主对话无技能 → 调
+                # use_skill(review)；激活后（SOP 注入或激活结果回灌）→ 跑
+                # git diff 出审查结论；所有结果都留在主历史
+                last_user = _anthropic_last_user_text(body)
+                has_diff = _anthropic_has_tool_result_containing(body, "git diff")
+                activated = _anthropic_has_tool_result_containing(body, "技能 review 已激活")
+                if "请审查当前项目的改动" in last_user or activated:
+                    if not has_diff:
+                        send(
+                            _anthropic_tool_round(
+                                "toolu_rev_1", "run_command", {"command": "git diff"},
+                                text="我来查看当前改动。",
+                            )
+                        )
+                    else:
+                        send(_anthropic_text_round("审查完成：改动整体良好，发现 1 处可改进点（变量命名）。"))
+                else:
+                    send(
+                        _anthropic_tool_round(
+                            "toolu_rev_0", "use_skill", {"name": "review"},
+                            text="我用 review 技能来审查。",
+                        )
+                    )
             elif has_tools and model == "danger-model":
                 send(_anthropic_multi_tool_events(DANGER_CALLS))
             elif has_tools and model == "unknown-tool-model":

@@ -138,6 +138,9 @@ class TuiUiController(UiController):
 
     def clear_conversation(self) -> None:
         self._session.clear()
+        # ch13 F7：清空对话顺带清掉已激活技能与已注册的技能命令
+        if self._skill_manager is not None:
+            self._skill_manager.clear()
 
     def compact_now(self) -> str:
         return self._agent.compact_now()
