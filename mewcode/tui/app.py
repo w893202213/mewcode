@@ -12,6 +12,7 @@ import json
 import queue
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
@@ -51,8 +52,10 @@ from mewcode.commands.dispatch import CommandResult, dispatch
 from mewcode.commands.parser import parse_command
 from mewcode.commands.registry import CommandRegistry
 from mewcode.permissions import MODE_LABELS, Action, Mode, PermissionGate, RuleSet, exact_rule
+from mewcode.provider import create_provider
 from mewcode.provider.base import Provider
 from mewcode.session import ChatSession
+from mewcode.skills.manager import SkillManager
 from mewcode.tools import ToolRegistry
 from mewcode.tui.completion import CommandCompleter
 from mewcode.tui.double_press import DoublePressTracker, ExitSignal
@@ -100,6 +103,8 @@ def run(
     gate: PermissionGate | None = None,
     memory: MemoryContext | None = None,
     command_registry: CommandRegistry | None = None,
+    skill_manager: SkillManager | None = None,
+    skills_summary: str = "",
 ) -> None:
     """TUI 主循环：读输入 → 分流（命令走本地分发，其余送 Agent）→ 回到输入。
 
@@ -107,6 +112,8 @@ def run(
     为 None 时按纯内存会话运行（测试/嵌入场景，行为与 ch10 一致）。
     command_registry（ch12）：命令注册中心，None 时用内置命令构建
     （cli 启动期已构建校验，冲突会在此抛异常）。
+    skill_manager / skills_summary（ch13）：技能管理器（激活状态、白名单、
+    技能命令注册）与技能清单（注入系统提示 stable）；None 时按无技能运行。
     """
     if command_registry is None:
         command_registry = build_registry()
@@ -115,6 +122,9 @@ def run(
         gate = PermissionGate(Path.cwd().resolve(), RuleSet(), Mode.DEFAULT)
     root = Path.cwd().resolve()
     session = memory.session if memory is not None else ChatSession()
+    # ch13 F7：技能命令注册到命令中心（激活时经管理器登记；撞内置名跳过）
+    if skill_manager is not None:
+        skill_manager.attach_registry(command_registry)
     agent = Agent(
         provider,
         registry,
@@ -123,6 +133,8 @@ def run(
         gate=gate,
         context_window=config.context_window,  # ch09 F1
         memory_loader=memory.memory_loader if memory is not None else None,
+        skills_summary=skills_summary,
+        skill_manager=skill_manager,
     )
     # ch11 F5：轮自然结束后异步更新记忆；提示经队列送回主线程打印
     notice_queue: queue.Queue[str] = queue.Queue()
@@ -182,6 +194,87 @@ def run(
                 ui,
             )
 
+        def _run_independent_skill(name: str, args: str) -> None:
+            """独立模式技能执行（ch13 F6/F8）：独立对话跑完，摘要回流 + 自动续一轮。
+
+            独立对话复用主循环事件渲染（流式可见、权限弹窗），但不落会话
+            存档（log=None）；摘要 = 独立对话最终助手回复，回流主历史后
+            自动触发主对话一轮让模型继续或汇报。
+            """
+            if skill_manager is None:
+                console.print("技能系统未启用。")
+                return
+            result = skill_manager.activate(name, args)  # 热更新 + 激活状态
+            if not result.ok:
+                console.print(f"技能执行失败: {result.error}")
+                return
+            skill = result.skill
+            # 独立会话：新鲜会话 + 主对话最近 history 条历史（F6）
+            inner_session = ChatSession()
+            if skill.history > 0:
+                inner_session.restore(session.messages[-skill.history:])
+            # 独立管理器：共享技能字典、激活状态隔离（预激活本技能）
+            inner_manager = SkillManager(skill_manager.skills)
+            inner_activated = inner_manager.activate(name, args)
+            if not inner_activated.ok:
+                console.print(f"技能执行失败: {inner_activated.error}")
+                return
+            # model 字段：派生 ProviderConfig 重建 provider（仅独立模式生效）
+            inner_provider = provider
+            if skill.model:
+                inner_provider = create_provider(replace(config, model=skill.model))
+            inner_agent = Agent(
+                inner_provider,
+                registry,
+                inner_session,
+                custom_instructions=custom_instructions,
+                gate=gate,
+                context_window=config.context_window,
+                skills_summary=skills_summary,
+                skill_manager=inner_manager,
+                # 独立存盘子目录：避免与外层 ResultStore 序号撞车
+                context_dir=root / ".mewcode" / "context" / "skills",
+            )
+            start_index = len(inner_session.messages)
+            task_text = args or f"请执行技能 {name}"
+            end = _agent_round(
+                console,
+                inner_agent,
+                task_text,
+                tracker,
+                gate,
+                inner_session,
+                log=None,
+                updater=None,
+                ui=ui,
+                prefix=f"[bold magenta]🐱 MewCode[/bold magenta]（技能 {name} 独立执行）",
+            )
+            # 摘要 = 独立对话新增消息中最后一条助手回复；失败回流失败说明
+            summary = None
+            for m in reversed(inner_session.messages[start_index:]):
+                if m.role == "assistant" and m.text:
+                    summary = m.text
+                    break
+            if summary is None:
+                summary = f"独立执行未完成: {end.message if end is not None else '已取消'}"
+            console.print(
+                Panel(
+                    summary,
+                    title=f"[bold]技能 {name} 独立执行摘要[/bold]",
+                    border_style="cyan",
+                )
+            )
+            # 摘要回流主历史 + 自动触发主对话一轮（F8，已确认的自动续轮）
+            _run_agent_round(f"【技能 {name} 独立执行摘要】\n{summary}")
+
+        def _drain_pending_independent() -> None:
+            """轮末取走并执行模型登记的独立技能（use_skill 工具路径，F8）。"""
+            if skill_manager is None:
+                return
+            pending = skill_manager.take_pending()
+            if pending is not None:
+                _run_independent_skill(*pending)
+
         # ch12 F4：命令处理函数与渲染框架之间的唯一桥梁
         ui = TuiUiController(
             console=console,
@@ -193,6 +286,8 @@ def run(
             root=root,
             run_agent_round=_run_agent_round,
             invalidate=_invalidate,
+            skill_manager=skill_manager,
+            run_independent=_run_independent_skill,
         )
         _print_welcome(console, config, gate, memory.resume_summary if memory else "")
 
@@ -214,6 +309,7 @@ def run(
                 if not text.strip():
                     continue  # 空白输入早返回
                 _run_agent_round(text)
+                _drain_pending_independent()  # ch13 F8：本轮结束后执行登记的独立技能
                 continue
             if dispatch(command_registry, parsed, ui) is CommandResult.EXIT:
                 return
@@ -229,7 +325,8 @@ def _agent_round(
     log: SessionLog | None,
     updater: NoteUpdater | None,
     ui: TuiUiController,
-) -> None:
+    prefix: str = _ASSISTANT_PREFIX,
+) -> RoundEnd:
     """一轮 Agent Loop：后台跑 Agent，主线程消费事件渲染（F9）。
 
     用户消息不回显：prompt_toolkit 输入行已留在终端滚动区，问题天然可见。
@@ -237,11 +334,13 @@ def _agent_round(
     结束后（ch11 F2/F5）：本轮新增消息追加落盘 JSONL；自然结束（OK）
     时触发异步笔记更新（busy 时内部跳过，不阻塞输入）。
     结束后（ch12）：token 用量记录进 ui（/status 数据源）。
+    prefix（ch13）：助手回复前缀可定制（独立执行显示技能名）；
+    返回 RoundEnd（独立执行判断成败用，主循环调用方忽略）。
     """
     start_index = len(session.messages)
     q = run_in_background(agent, text)
     # 助手回复前缀独立成行，事件流内容渲染在它下方
-    console.print(_ASSISTANT_PREFIX)
+    console.print(prefix)
     usage: dict[str, int | None] = {"in": 0, "out": 0, "cache_hit": None, "cache_write": None}
     end: RoundEnd | None = None
     try:
@@ -265,6 +364,7 @@ def _agent_round(
             updater.submit(session.messages)
     # ch12：记录最近一轮与累计 token（/status 数据源）
     ui.record_usage(usage)
+    return end
 
 
 def _drain_notices(console: Console, notice_queue: queue.Queue) -> None:

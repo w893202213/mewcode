@@ -40,6 +40,7 @@ from mewcode.memory.sessions import (
 )
 from mewcode.permissions import MODE_LABELS
 from mewcode.session import ChatSession
+from mewcode.skills.manager import SkillManager
 
 # 提示行灰色样式（与 tui/app.py 计时行口径一致）
 _TIMER_STYLE = "grey50"
@@ -61,6 +62,8 @@ class TuiUiController(UiController):
         root: Path,
         run_agent_round: Callable[[str], None],
         invalidate: Callable[[], None],
+        skill_manager: SkillManager | None = None,
+        run_independent: Callable[[str, str], None] | None = None,
     ) -> None:
         self._console = console
         self._session = session
@@ -71,6 +74,9 @@ class TuiUiController(UiController):
         self._root = root
         self._run_agent_round = run_agent_round
         self._invalidate = invalidate
+        # ch13：技能管理器（斜杠命令执行技能用）与独立执行回调（app.py 注入）
+        self._skill_manager = skill_manager
+        self._run_independent = run_independent
         # token 累计（record_usage 在每轮 Agent Loop 结束时由主循环调用）
         self._round_usage: dict[str, int | None] = {}
         self._total_in = 0
@@ -85,6 +91,30 @@ class TuiUiController(UiController):
 
     def send_user_message(self, text: str) -> None:
         self._run_agent_round(text)
+
+    # ---------- 技能执行（ch13 F6/F7） ----------
+
+    def run_skill(self, name: str, args: str) -> None:
+        """执行技能：activate 热更新后按当前模式分流——shared 注入主对话，
+        independent 走独立执行回调（app.py 注入的 _run_independent_skill）。"""
+        if self._skill_manager is None:
+            self.display("技能系统未启用。")
+            return
+        result = self._skill_manager.activate(name, args)
+        if not result.ok:
+            self.display(f"技能执行失败: {result.error}")
+            return
+        warnings = self._skill_manager.take_warnings()
+        for warning in warnings:
+            self.display(f"警告: {warning}")
+        if result.skill.mode.value == "independent":
+            if self._run_independent is None:
+                self.display("独立执行不可用（当前界面未接入）。")
+                return
+            self._run_independent(name, args)
+        else:
+            self.display(f"已激活技能 {name}（共享模式），指令已注入对话。")
+            self.send_user_message(result.body)
 
     # ---------- 模式切换 ----------
 
