@@ -8,6 +8,7 @@ build_registry 抛 CommandConflictError，cli 层 stderr + exit(1)——
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Callable
@@ -50,13 +51,18 @@ class CommandConflictError(Exception):
 
 
 class CommandRegistry:
-    """命令登记、冲突校验、别名解析与可见列表。"""
+    """命令登记、冲突校验、别名解析与可见列表。
+
+    线程安全（ch13）：技能命令在工具执行线程注册/撤销，与主线程的
+    补全与分发并发——登记、撤销与索引重建共用一把锁。
+    """
 
     def __init__(self) -> None:
         self._specs: list[CommandSpec] = []
         self._by_name: dict[str, CommandSpec] = {}
         self._alias_to_name: dict[str, str] = {}
-        self._indexed = False  # 索引过期标记：register 后置 False
+        self._indexed = False  # 索引过期标记：register/unregister 后置 False
+        self._lock = threading.Lock()
 
     def register(self, spec: CommandSpec) -> None:
         """登记一条命令；名称与别名归一为小写。"""
@@ -69,8 +75,15 @@ class CommandRegistry:
                 name=spec.name.lower(),
                 aliases=tuple(a.lower() for a in spec.aliases),
             )
-        self._specs.append(normalized)
-        self._indexed = False
+        with self._lock:
+            self._specs.append(normalized)
+            self._indexed = False
+
+    def unregister(self, name: str) -> None:
+        """移除一条命令及其别名（ch13 技能命令撤销）；不存在时静默忽略。"""
+        with self._lock:
+            self._specs = [s for s in self._specs if s.name != name.lower()]
+            self._indexed = False
 
     def validate(self) -> list[str]:
         """整体校验，返回问题列表（空列表 = 通过）。"""
@@ -123,10 +136,13 @@ class CommandRegistry:
         """构建名字/别名索引（validate 通过后的正常路径；重名时首个生效）。"""
         if self._indexed:
             return
-        self._by_name = {}
-        self._alias_to_name = {}
-        for spec in self._specs:
-            self._by_name.setdefault(spec.name, spec)
-            for alias in spec.aliases:
-                self._alias_to_name.setdefault(alias, spec.name)
-        self._indexed = True
+        with self._lock:
+            if self._indexed:  # 双检：等锁期间可能已被其他线程重建
+                return
+            self._by_name = {}
+            self._alias_to_name = {}
+            for spec in self._specs:
+                self._by_name.setdefault(spec.name, spec)
+                for alias in spec.aliases:
+                    self._alias_to_name.setdefault(alias, spec.name)
+            self._indexed = True
