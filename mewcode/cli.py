@@ -19,6 +19,14 @@ from mewcode.mcp import McpManager, load_mcp_servers
 from mewcode.memory import build_memory_context, load_instructions
 from mewcode.permissions import PermissionGate, RuleSet
 from mewcode.provider import create_provider
+from mewcode.skills import BUILTIN_SKILLS_DIR
+from mewcode.skills.discover import (
+    discover_skills,
+    skills_summary,
+    validate_whitelists,
+)
+from mewcode.skills.manager import SkillManager
+from mewcode.skills.use_skill import UseSkillTool
 from mewcode.tools import create_registry
 from mewcode.tui.app import run
 
@@ -76,10 +84,12 @@ def _build_gate(config_path: str) -> PermissionGate:
 def main(argv: list[str] | None = None) -> None:
     """入口：配置错误打印到 stderr 并以非零码退出。
 
-    装配顺序（ch08 + ch11 F6 + ch12）：providers → 闸门 → 内置工具 → MCP
-    发现注册（内部警告不抛）→ 规则工具名统一校验 → 命令注册中心
-    （冲突即启动失败）→ 三层指令加载 → 记忆上下文（创建/恢复会话
-    + 过期清理）→ TUI；退出时统一关闭全部 MCP 连接（终止子进程）。
+    装配顺序（ch08 + ch11 F6 + ch12 + ch13）：providers → 闸门 → 内置工具
+    → MCP 发现注册（内部警告不抛）→ 规则工具名统一校验 → 命令注册中心
+    （冲突即启动失败）→ 技能发现（警告不阻断）→ use_skill 注册 →
+    白名单启动校验（未知工具即退出）→ 三层指令加载 → 记忆上下文
+    （创建/恢复会话 + 过期清理）→ TUI；退出时统一关闭全部 MCP 连接
+    （终止子进程）。
     """
     args = _parse_args(argv)
     try:
@@ -112,8 +122,24 @@ def main(argv: list[str] | None = None) -> None:
         manager.shutdown()  # 清理已启动的 MCP 连接
         sys.exit(1)
 
-    # ch11 F1：三层指令加载（警告不阻断），config 字段作为用户级最末段
+    # ch13 F2/F5：技能发现（警告不阻断）→ 管理器 → use_skill 注册 →
+    # 白名单启动校验（引用不存在的工具立即退出，N6）
     project_root = Path.cwd().resolve()
+    discovered = discover_skills(project_root, USER_DIR, BUILTIN_SKILLS_DIR)
+    for warning in discovered.warnings:
+        print(f"警告: {warning}", file=sys.stderr)
+    skill_manager = SkillManager(discovered.skills)
+    registry.register(UseSkillTool(skill_manager))
+    problems = validate_whitelists(
+        discovered.skills, {tool.name for tool in registry.list()}
+    )
+    if problems:
+        for problem in problems:
+            print(f"配置错误: {problem}", file=sys.stderr)
+        manager.shutdown()
+        sys.exit(1)
+
+    # ch11 F1：三层指令加载（警告不阻断），config 字段作为用户级最末段
     instructions = load_instructions(project_root, USER_DIR)
     for warning in instructions.warnings:
         print(f"警告: {warning}", file=sys.stderr)
@@ -137,6 +163,8 @@ def main(argv: list[str] | None = None) -> None:
             gate,
             memory=memory,
             command_registry=command_registry,
+            skill_manager=skill_manager,
+            skills_summary=skills_summary(discovered.skills),
         )
     finally:
         manager.shutdown()
