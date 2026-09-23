@@ -55,7 +55,6 @@ def test_empty_prefix_lists_all():
         "/permission",
         "/plan",
         "/resume",
-        "/review",
         "/session",
         "/status",
     ]

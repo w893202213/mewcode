@@ -93,6 +93,11 @@ class UiController(Protocol):
         """提示词类命令：把预设文本作为用户消息送入对话并触发 Agent 一轮。"""
         ...
 
+    def run_skill(self, name: str, args: str) -> None:
+        """执行技能（ch13 F7）：按技能当前模式分流——共享模式把 SOP 作为
+        用户消息注入对话触发一轮；独立模式触发独立执行 + 摘要回流。"""
+        ...
+
     def enter_plan_mode(self) -> None:
         """进入计划模式并刷新状态栏。"""
         ...

@@ -23,13 +23,6 @@ from mewcode.commands.ui import (
     UiController,
 )
 
-# /review 注入的预设提示词（提示词类命令的典型）
-_REVIEW_PROMPT = (
-    "请审查当前项目的改动：用 run_command 执行 git diff 查看未提交改动"
-    "（若工作区干净则查看最近一次提交），指出其中的 bug、风险与可改进点，"
-    "并给出修改建议。"
-)
-
 _TYPE_LABELS = {
     CommandType.LOCAL: "纯本地",
     CommandType.UI: "影响界面状态",
@@ -92,11 +85,6 @@ def _cmd_session(cmd: ParsedCommand, ui: UiController) -> CommandResult | None:
 
 def _cmd_memory(cmd: ParsedCommand, ui: UiController) -> CommandResult | None:
     ui.display(_format_memory(ui.memory_info()))
-    return None
-
-
-def _cmd_review(cmd: ParsedCommand, ui: UiController) -> CommandResult | None:
-    ui.send_user_message(_REVIEW_PROMPT)
     return None
 
 
@@ -278,12 +266,6 @@ def register_builtins(registry: CommandRegistry) -> None:
         CommandSpec(
             name="status", description="查看系统状态与 token 用量", usage="/status",
             type=CommandType.LOCAL, handler=_cmd_status,
-        )
-    )
-    registry.register(
-        CommandSpec(
-            name="review", description="审查当前项目改动（送 AI）", usage="/review",
-            aliases=("r",), type=CommandType.PROMPT, handler=_cmd_review,
         )
     )
     registry.register(

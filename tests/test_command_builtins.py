@@ -1,9 +1,11 @@
-"""内置命令单测（ch12 F7）：12 条 handler 用 FakeUi 验证接口调用与文案。"""
+"""内置命令单测（ch12 F7 / ch13 F9）：11 条 handler 用 FakeUi 验证接口调用与文案。
+
+ch13：/review 迁移给 review 技能（skills 包），内置命令 12→11 条。"""
 
 import pytest
 
 from mewcode.commands import builtins
-from mewcode.commands.builtins import _REVIEW_PROMPT, build_registry
+from mewcode.commands.builtins import build_registry
 from mewcode.commands.dispatch import CommandResult, dispatch
 from mewcode.commands.parser import ParsedCommand
 from mewcode.commands.registry import CommandConflictError, CommandRegistry, CommandSpec
@@ -118,7 +120,7 @@ def registry() -> CommandRegistry:
 
 def test_build_registry_has_12_commands():
     r = build_registry()
-    assert len(r.all()) == 12
+    assert len(r.all()) == 11
     assert r.validate() == []
 
 
@@ -127,7 +129,6 @@ def test_alias_table():
     assert r.resolve("h").name == "help"
     assert r.resolve("q").name == "exit"
     assert r.resolve("quit").name == "exit"
-    assert r.resolve("r").name == "review"
     assert r.resolve("m").name == "memory"
     assert r.resolve("mode").name == "permission"
     assert r.resolve("perm").name == "permission"
@@ -152,7 +153,7 @@ def test_help_lists_all_visible_commands(registry, ui):
     text = ui.displayed[0]
     assert "可用命令" in text
     for name in ("help", "compact", "clear", "plan", "do", "session", "memory",
-                 "permission", "status", "review", "exit", "resume"):
+                 "permission", "status", "exit", "resume"):
         assert f"/{name}" in text
     assert "别名 /mode、/perm" in text  # 别名展示
 
@@ -293,13 +294,15 @@ def test_memory_without_system(registry, ui):
     assert "记忆系统未启用" in ui.displayed[0]
 
 
-# ---------- 提示词类 ----------
+# ---------- /review 迁移（ch13 F9） ----------
 
-def test_review_sends_preset_prompt(registry, ui):
+def test_review_command_removed_unknown_now(registry, ui):
+    """/review 已迁移给 review 技能：内置命令表里不再有，输入提示未知命令。"""
+    assert registry.resolve("review") is None
     result = dispatch(registry, ParsedCommand(name="review", args=""), ui)
     assert result is CommandResult.CONTINUE
-    assert ui.sent == [_REVIEW_PROMPT]
-    assert "git diff" in ui.sent[0]
+    assert ui.sent == []  # 不再注入提示词（改由技能路径承担）
+    assert "未知命令" in ui.displayed[0]
 
 
 # ---------- /resume ----------
