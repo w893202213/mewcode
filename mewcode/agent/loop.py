@@ -50,6 +50,8 @@ from mewcode.prompt import (
     SystemPromptBuilder,
 )
 from mewcode.session import ChatSession, ToolResultRecord, ToolUse
+from mewcode.skills.manager import SkillManager
+from mewcode.skills.use_skill import USE_SKILL_TOOL_NAME
 from mewcode.tools.base import Tool, ToolError, ToolResult
 from mewcode.tools.registry import ToolRegistry
 
@@ -140,6 +142,8 @@ class Agent:
         context_window: int = 200000,  # 上下文窗口上限（ch09 F1）
         context_dir: Path | None = None,  # 工具结果存盘目录（ch09 F3，缺省启动目录/.mewcode/context）
         memory_loader: Callable[[], str] | None = None,  # 记忆索引加载器（ch11 F5，每轮现取）
+        skills_summary: str = "",  # 技能清单（ch13 F3，进 stable 缓存前缀）
+        skill_manager: SkillManager | None = None,  # 技能管理器（ch13 F5，白名单收窄）
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -156,12 +160,19 @@ class Agent:
         )
         # 挂起的权限询问 (future, 事件循环)；无询问时为 None
         self._pending: tuple[asyncio.Future, asyncio.AbstractEventLoop] | None = None
+        # 技能管理器：激活状态与白名单（ch13）；None = 无技能收窄（行为与 ch12 一致）
+        self._skill_manager = skill_manager
         # 系统提示拼装器：环境快照（启动目录+平台）构造时采样，日期每次 build 现取；
-        # 自定义指令来自配置（可选）；记忆索引每轮现取（ch11）
+        # 自定义指令来自配置（可选）；记忆索引每轮现取（ch11）；技能清单进
+        # stable、已激活技能块每轮现取（ch13）
         self._builder = SystemPromptBuilder(
             Environment(cwd=_safe_cwd(), platform=platform.platform()),
             custom_instructions=custom_instructions,
             memory_loader=memory_loader,
+            skills_summary=skills_summary,
+            skills_loader=(
+                skill_manager.active_snapshot if skill_manager is not None else None
+            ),
         )
         # ch09：上下文管理——估算器、存盘器、压缩器；存盘目录不可用时降级
         # 为恒失败 store，prevent 静默降级、不阻断请求（N6）
@@ -281,10 +292,17 @@ class Agent:
         )
 
     def _visible_tools(self) -> list[Tool]:
-        """本轮发给模型的工具列表：计划模式下收窄为只读工具。"""
+        """本轮发给模型的工具列表：计划模式只读过滤 + 技能白名单收窄（ch13 F5）。
+
+        白名单收窄 = 各激活技能白名单并集 ∪ use_skill（系统级永远放行）；
+        两种过滤叠加生效。
+        """
         tools = self._registry.list()
         if self._plan_mode:
-            return [t for t in tools if t.read_only]
+            tools = [t for t in tools if t.read_only]
+        if self._skill_manager is not None and self._skill_manager.whitelist_active():
+            allowed = self._skill_manager.whitelist() | {USE_SKILL_TOOL_NAME}
+            tools = [t for t in tools if t.name in allowed]
         return tools
 
     def _is_read_only(self, call: ToolCall) -> bool:
@@ -476,6 +494,17 @@ class Agent:
                         tool = self._registry.get(call.name)
                     except ToolError:
                         planned.append(call)  # 未知工具无闸门可查，交给 execute_call 报错
+                        continue
+                    # ch13 F5：白名单执行侧兜底——可见性收窄之外，拦截模型
+                    # 幻觉调用的白名单外工具（use_skill 系统级不受约束）
+                    if (
+                        self._skill_manager is not None
+                        and not self._skill_manager.is_allowed(call.name)
+                        and call.name != USE_SKILL_TOOL_NAME
+                    ):
+                        results[id(call)] = ToolResult.failure(
+                            f"技能白名单未包含该工具: {call.name}"
+                        )
                         continue
                     verdict = self._gate.check(tool, call)
                     if verdict.action is Action.DENY:
