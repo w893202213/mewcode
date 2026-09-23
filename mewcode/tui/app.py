@@ -15,7 +15,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import NestedCompleter
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import prompt
@@ -47,13 +46,17 @@ from mewcode.memory import (
     NoteManager,
     NoteUpdater,
 )
-from mewcode.memory.sessions import SessionLog, maybe_add_time_gap_notice
+from mewcode.commands.builtins import build_registry
+from mewcode.commands.dispatch import CommandResult, dispatch
+from mewcode.commands.parser import parse_command
+from mewcode.commands.registry import CommandRegistry
 from mewcode.permissions import MODE_LABELS, Action, Mode, PermissionGate, RuleSet, exact_rule
 from mewcode.provider.base import Provider
 from mewcode.session import ChatSession
 from mewcode.tools import ToolRegistry
-from mewcode.tui.commands import CommandResult, COMMAND_NAMES, handle_command
+from mewcode.tui.completion import CommandCompleter
 from mewcode.tui.double_press import DoublePressTracker, ExitSignal
+from mewcode.tui.uicontroller import TuiUiController
 
 # 渲染样式常量
 _ASSISTANT_PREFIX = "[bold magenta]🐱 MewCode[/bold magenta]"
@@ -96,12 +99,17 @@ def run(
     custom_instructions: str = "",
     gate: PermissionGate | None = None,
     memory: MemoryContext | None = None,
+    command_registry: CommandRegistry | None = None,
 ) -> None:
-    """TUI 主循环：读输入 → 命令或 Agent Loop → 回到输入。
+    """TUI 主循环：读输入 → 分流（命令走本地分发，其余送 Agent）→ 回到输入。
 
     memory（ch11）：记忆上下文——会话存档、索引加载器、笔记更新器；
     为 None 时按纯内存会话运行（测试/嵌入场景，行为与 ch10 一致）。
+    command_registry（ch12）：命令注册中心，None 时用内置命令构建
+    （cli 启动期已构建校验，冲突会在此抛异常）。
     """
+    if command_registry is None:
+        command_registry = build_registry()
     if gate is None:
         # 缺省闸门（与 Agent 缺省一致）：项目根=cwd、默认档、空规则
         gate = PermissionGate(Path.cwd().resolve(), RuleSet(), Mode.DEFAULT)
@@ -140,19 +148,52 @@ def run(
             event.app.invalidate()  # 立即重绘，让提示出现
 
     # 默认 InMemoryHistory：上下键回溯本次会话输入
-    # bottom_toolbar：仅在提示窗口内显示「再按一次 Ctrl+C 退出」（返回 None 时隐藏）
+    # bottom_toolbar：状态栏（权限档 + [PLAN]），Ctrl+C 双击提示激活时临时替换
     # refresh_interval：0.5s 重绘一次，提示 3 秒后自动过期消失
     prompt_session = PromptSession(
         message=[("class:prompt", "❯ ")],
-        completer=NestedCompleter.from_nested_dict({cmd: None for cmd in COMMAND_NAMES}),
+        completer=CommandCompleter(command_registry),
         key_bindings=kb,
-        bottom_toolbar=lambda: _EXIT_HINT if tracker.hint_active() else None,
+        bottom_toolbar=lambda: _status_toolbar(tracker, gate, agent),
         refresh_interval=0.5,
     )
+
+    def _invalidate() -> None:
+        """状态栏立即重绘：仅当输入会话活跃时有效，否则下轮 prompt 天然带新状态。"""
+        app = getattr(prompt_session, "app", None)
+        if app is not None:
+            app.invalidate()
 
     # patch_stdout(raw=True)：Rich 输出与 prompt_toolkit 输入行共存
     with patch_stdout(raw=True):
         console = Console()
+
+        def _run_agent_round(text: str) -> None:
+            """提示词类命令注入用户消息并触发完整 Agent 一轮（闭包晚绑定 ui）。"""
+            _agent_round(
+                console,
+                agent,
+                text,
+                tracker,
+                gate,
+                session,
+                memory.log if memory is not None else None,
+                updater,
+                ui,
+            )
+
+        # ch12 F4：命令处理函数与渲染框架之间的唯一桥梁
+        ui = TuiUiController(
+            console=console,
+            session=session,
+            agent=agent,
+            gate=gate,
+            memory=memory,
+            config=config,
+            root=root,
+            run_agent_round=_run_agent_round,
+            invalidate=_invalidate,
+        )
         _print_welcome(console, config, gate, memory.resume_summary if memory else "")
 
         while True:
@@ -167,32 +208,15 @@ def run(
                 return  # 双击 Ctrl+C：正常退出，回到 CLI
             # ch11：先打印上轮异步笔记更新的提示（若有），再处理本次输入
             _drain_notices(console, notice_queue)
-            text = text.strip()
-            if not text:
+            # ch12 F5 回车入口分流器：斜杠命令走本地分发，其余送 Agent
+            parsed = parse_command(text)
+            if parsed is None:
+                if not text.strip():
+                    continue  # 空白输入早返回
+                _run_agent_round(text)
                 continue
-            if text == "/resume":
-                # ch11 F3：多步交互（列表 → 选编号 → 恢复），在界面层就地处理
-                if memory is None:
-                    console.print("记忆系统未启用，无法恢复会话。")
-                else:
-                    _resume_flow(console, memory, agent)
-                continue
-            if text.startswith("/"):
-                result, feedback = handle_command(text, session, agent)
-                console.print(feedback)
-                if result is CommandResult.EXIT:
-                    return
-                continue
-            _agent_round(
-                console,
-                agent,
-                text,
-                tracker,
-                gate,
-                session,
-                memory.log if memory is not None else None,
-                updater,
-            )
+            if dispatch(command_registry, parsed, ui) is CommandResult.EXIT:
+                return
 
 
 def _agent_round(
@@ -204,6 +228,7 @@ def _agent_round(
     session: ChatSession,
     log: SessionLog | None,
     updater: NoteUpdater | None,
+    ui: TuiUiController,
 ) -> None:
     """一轮 Agent Loop：后台跑 Agent，主线程消费事件渲染（F9）。
 
@@ -211,6 +236,7 @@ def _agent_round(
     Ctrl+C 取消循环（已完成步骤保留）；取消后继续排空队列直到 RoundEnd。
     结束后（ch11 F2/F5）：本轮新增消息追加落盘 JSONL；自然结束（OK）
     时触发异步笔记更新（busy 时内部跳过，不阻塞输入）。
+    结束后（ch12）：token 用量记录进 ui（/status 数据源）。
     """
     start_index = len(session.messages)
     q = run_in_background(agent, text)
@@ -237,6 +263,8 @@ def _agent_round(
             log.append_messages(new_messages, time.time())
         if end.reason is RoundEndReason.OK and updater is not None:
             updater.submit(session.messages)
+    # ch12：记录最近一轮与累计 token（/status 数据源）
+    ui.record_usage(usage)
 
 
 def _drain_notices(console: Console, notice_queue: queue.Queue) -> None:
@@ -249,62 +277,18 @@ def _drain_notices(console: Console, notice_queue: queue.Queue) -> None:
         console.print(Text(notice, style=_TIMER_STYLE))
 
 
-def _resume_flow(console: Console, memory: MemoryContext, agent: Agent) -> None:
-    """/resume 交互：列出最近 5 个会话 → 选编号 → 恢复（ch11 F3）。
+def _status_toolbar(tracker: DoublePressTracker, gate: PermissionGate, agent: Agent) -> Text | None:
+    """状态栏：权限档英文标记 + 计划模式 [PLAN]（ch12 F4）。
 
-    恢复 = 替换会话内容 + 切换日志句柄 + 时间跨度提醒 + 超限先压一次。
-    恢复后 estimator 未锚定无需处理：首次请求自动锚定（ch09 F2）。
+    每次重绘直读 live 状态（0.5s 定时兜底），模式切换后立即反映；
+    Ctrl+C 双击提示激活时临时替换显示。
     """
-    summaries = memory.store.list_recent(5)
-    if not summaries:
-        console.print("没有可恢复的会话。")
-        return
-    lines = ["编号  标题  会话 ID  消息数  最后活动"]
-    for i, s in enumerate(summaries, start=1):
-        mtime = time.strftime("%m-%d %H:%M", time.localtime(s.mtime))
-        lines.append(f"  {i}.   {s.title}  {s.id}  {s.message_count} 条  {mtime}")
-    console.print(Panel("\n".join(lines), title="[bold]最近会话[/bold]", border_style="cyan"))
-    while True:
-        try:
-            answer = prompt("选择编号（回车取消）> ")
-        except EOFError:
-            return
-        answer = answer.strip()
-        if not answer:
-            return
-        if not answer.isdigit() or not (1 <= int(answer) <= len(summaries)):
-            console.print("请输入列表中的编号（回车取消）。")
-            continue
-        break
-    summary = summaries[int(answer) - 1]
-    try:
-        result = memory.store.load(summary.id)
-    except FileNotFoundError:
-        console.print(Text(f"会话 {summary.id} 的存档已不存在。", style=_TIMER_STYLE))
-        return
-    if not result.messages:
-        console.print(Text(f"会话 {summary.id} 无有效记录，无法恢复。", style=_TIMER_STYLE))
-        return
-    memory.session.restore(result.messages)
-    if maybe_add_time_gap_notice(memory.session.messages, result.last_ts, time.time()):
-        console.print(Text("该会话已超过 7 天，已插入时间跨度提醒。", style=_TIMER_STYLE))
-    memory.log.close()
-    memory.log = SessionLog(memory.store.path(summary.id))
-    title = result.title or "（无标题）"
-    console.print(
-        f"已恢复会话 {summary.id}（{title}，{len(result.messages)} 条消息）。"
-    )
-    if result.skipped_lines:
-        console.print(
-            Text(f"跳过 {result.skipped_lines} 行无法解析的记录。", style=_TIMER_STYLE)
-        )
-    if result.truncated:
-        console.print(
-            Text("发现未写完的对话尾巴，已截断至最后一个完整轮次。", style=_TIMER_STYLE)
-        )
-    feedback = agent.maybe_compact_on_restore()
-    if feedback:
-        console.print(Text(feedback, style=_TIMER_STYLE))
+    if tracker.hint_active():
+        return Text(_EXIT_HINT)
+    parts = [f"[{gate.mode.value.upper()}]"]
+    if agent.plan_mode:
+        parts.append("[PLAN]")
+    return Text(" ".join(parts))
 
 
 def _consume_events(

@@ -6,6 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from mewcode.commands.builtins import build_registry
+from mewcode.commands.registry import CommandConflictError
 from mewcode.config import (
     ConfigError,
     load_config,
@@ -74,10 +76,10 @@ def _build_gate(config_path: str) -> PermissionGate:
 def main(argv: list[str] | None = None) -> None:
     """入口：配置错误打印到 stderr 并以非零码退出。
 
-    装配顺序（ch08 + ch11 F6）：providers → 闸门 → 内置工具 → MCP
-    发现注册（内部警告不抛）→ 规则工具名统一校验 → 三层指令加载
-    → 记忆上下文（创建/恢复会话 + 过期清理）→ TUI；退出时统一关闭
-    全部 MCP 连接（终止子进程）。
+    装配顺序（ch08 + ch11 F6 + ch12）：providers → 闸门 → 内置工具 → MCP
+    发现注册（内部警告不抛）→ 规则工具名统一校验 → 命令注册中心
+    （冲突即启动失败）→ 三层指令加载 → 记忆上下文（创建/恢复会话
+    + 过期清理）→ TUI；退出时统一关闭全部 MCP 连接（终止子进程）。
     """
     args = _parse_args(argv)
     try:
@@ -102,6 +104,14 @@ def main(argv: list[str] | None = None) -> None:
         manager.shutdown()  # 清理已启动的 MCP 连接
         sys.exit(1)
 
+    # ch12 F1：命令注册中心——撞名直接启动失败，不等运行时再炸
+    try:
+        command_registry = build_registry()
+    except CommandConflictError as e:
+        print(f"命令注册冲突：\n{e}", file=sys.stderr)
+        manager.shutdown()  # 清理已启动的 MCP 连接
+        sys.exit(1)
+
     # ch11 F1：三层指令加载（警告不阻断），config 字段作为用户级最末段
     project_root = Path.cwd().resolve()
     instructions = load_instructions(project_root, USER_DIR)
@@ -119,6 +129,14 @@ def main(argv: list[str] | None = None) -> None:
         print(memory.resume_summary)
 
     try:
-        run(provider, config, registry, custom_instructions, gate, memory=memory)
+        run(
+            provider,
+            config,
+            registry,
+            custom_instructions,
+            gate,
+            memory=memory,
+            command_registry=command_registry,
+        )
     finally:
         manager.shutdown()

@@ -86,6 +86,11 @@ class PermissionGate:
         self._rules = rules
         self.mode = mode
 
+    @property
+    def rules(self) -> RuleSet:
+        """规则集合（只读用途，如 ch12 /permission show 的规则统计）。"""
+        return self._rules
+
     def check(self, tool: Tool, call: ToolCall) -> Verdict:
         """按层序裁决一次调用；任一层拒绝即短路。"""
         # 层 1：黑名单（仅 run_command，硬拦截、不可放开）

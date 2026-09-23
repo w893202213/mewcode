@@ -69,20 +69,23 @@ def test_visible_tools_readonly_in_plan_mode():
 # T12: /plan /do 命令分发
 # ---------------------------------------------------------------------------
 
-from mewcode.tui.commands import CommandResult, handle_command
+from mewcode.commands.builtins import build_registry
+from mewcode.commands.dispatch import CommandResult, dispatch
+from mewcode.commands.parser import ParsedCommand
+from mewcode.commands.ui import StatusInfo, TokenStats, UiController
 
 
-class FakeAgent:
-    """记录 enter/exit 调用的假 Agent。"""
+class FakeUi(UiController):
+    """记录计划模式切换与展示的最小替身（其余接口方法用不到）。"""
 
-    def __init__(self):
+    def __init__(self) -> None:
+        self.displayed: list[str] = []
         self.entered = 0
         self.exited = 0
         self.mode = False
 
-    @property
-    def plan_mode(self) -> bool:
-        return self.mode
+    def display(self, text: str) -> None:
+        self.displayed.append(text)
 
     def enter_plan_mode(self) -> None:
         self.entered += 1
@@ -92,46 +95,55 @@ class FakeAgent:
         self.exited += 1
         self.mode = False
 
+    def status_info(self) -> StatusInfo:
+        return StatusInfo(
+            config_name="", model="", thinking=False, permission_label="",
+            plan_mode=self.mode, tokens=TokenStats(),
+        )
+
+
+def _run(text: str, ui: FakeUi) -> CommandResult:
+    return dispatch(build_registry(), ParsedCommand(name=text[1:], args=""), ui)
+
 
 def test_plan_command_enters_mode():
-    agent = FakeAgent()
-    result, feedback = handle_command("/plan", ChatSession(), agent)
+    ui = FakeUi()
+    result = _run("/plan", ui)
     assert result is CommandResult.CONTINUE
-    assert agent.entered == 1
-    assert "计划模式" in feedback
+    assert ui.entered == 1
+    assert any("计划模式" in t for t in ui.displayed)
 
 
 def test_plan_command_idempotent_feedback():
-    agent = FakeAgent()
-    agent.mode = True
-    result, feedback = handle_command("/plan", ChatSession(), agent)
+    ui = FakeUi()
+    ui.mode = True
+    result = _run("/plan", ui)
     assert result is CommandResult.CONTINUE
-    assert agent.entered == 0  # 已在模式：不再调用 enter
-    assert "已在计划模式" in feedback
+    assert ui.entered == 0  # 已在模式：不再调用 enter
+    assert any("已在计划模式" in t for t in ui.displayed)
 
 
 def test_do_command_exits_mode():
-    agent = FakeAgent()
-    agent.mode = True
-    result, feedback = handle_command("/do", ChatSession(), agent)
+    ui = FakeUi()
+    ui.mode = True
+    result = _run("/do", ui)
     assert result is CommandResult.CONTINUE
-    assert agent.exited == 1
-    assert "切回执行模式" in feedback
+    assert ui.exited == 1
+    assert any("切回执行模式" in t for t in ui.displayed)
 
 
 def test_do_command_without_plan_mode():
-    agent = FakeAgent()
-    result, feedback = handle_command("/do", ChatSession(), agent)
+    ui = FakeUi()
+    result = _run("/do", ui)
     assert result is CommandResult.CONTINUE
-    assert agent.exited == 0
-    assert "不在计划模式" in feedback
+    assert ui.exited == 0
+    assert any("不在计划模式" in t for t in ui.displayed)
 
 
 def test_help_lists_plan_and_do():
-    from mewcode.tui.commands import COMMAND_NAMES
-
-    assert "/plan" in COMMAND_NAMES and "/do" in COMMAND_NAMES
-    _, feedback = handle_command("/help", ChatSession(), FakeAgent())
+    ui = FakeUi()
+    _run("/help", ui)
+    feedback = ui.displayed[0]
     assert "/plan" in feedback and "/do" in feedback
 
 
