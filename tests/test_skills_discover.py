@@ -2,11 +2,13 @@
 
 from pathlib import Path
 
+from mewcode.skills import BUILTIN_SKILLS_DIR
 from mewcode.skills.discover import (
     discover_skills,
     skills_summary,
     validate_whitelists,
 )
+from mewcode.skills.model import SkillMode
 
 
 def _write(path: Path, text: str) -> None:
@@ -116,7 +118,7 @@ def test_validate_whitelists_ok_and_unknown():
 
 
 def test_skills_summary_sorted():
-    from mewcode.skills.model import Skill, SkillMode
+    from mewcode.skills.model import Skill
 
     def make(name, desc):
         return Skill(
@@ -127,3 +129,22 @@ def test_skills_summary_sorted():
     text = skills_summary({"b": make("b", "技能B"), "a": make("a", "技能A")})
     assert text == "【技能】\n- a: 技能A\n- b: 技能B"
     assert skills_summary({}) == ""
+
+
+def test_builtin_samples_discovered(tmp_path):
+    """T8：内置三个样板可解析且字段符合预期，test 为目录型。"""
+    result = discover_skills(tmp_path / "proj", tmp_path / "home", BUILTIN_SKILLS_DIR)
+    assert result.warnings == []
+    assert set(result.skills) == {"commit", "review", "test"}
+    commit = result.skills["commit"]
+    assert commit.mode is SkillMode.INDEPENDENT
+    assert commit.tools == ("run_command",)
+    assert commit.history == 0
+    assert "git" in commit.body
+    review = result.skills["review"]
+    assert review.mode is SkillMode.SHARED
+    assert "git diff" in review.body  # 承接 ch12 /review 提示词
+    test = result.skills["test"]
+    assert test.mode is SkillMode.SHARED
+    assert test.dir == BUILTIN_SKILLS_DIR / "test"  # 目录型技能
+    assert "$ARGS" in commit.body and "$ARGS" in review.body and "$ARGS" in test.body

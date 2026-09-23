@@ -22,3 +22,7 @@ mewcode = "mewcode.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["mewcode*"]
+
+[tool.setuptools.package-data]
+# ch13：内置样板技能随包分发（commit.md、review.md、test/ 目录）
+mewcode = ["skills/**/*.md"]
