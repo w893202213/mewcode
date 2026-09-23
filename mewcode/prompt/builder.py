@@ -95,6 +95,9 @@ class SystemPromptBuilder:
 
     memory_loader（ch11）：可选的回调，每次 build 调用以现取记忆索引文本——
     本轮新产生的笔记下一轮即可见；索引变化只影响 dynamic，不打断 stable 缓存。
+    skills_summary / skills_loader（ch13）：技能清单（会话内不变）进 stable
+    缓存前缀；已激活技能块（激活状态会变）由 loader 每轮现取，紧跟补充块
+    之后（F4 最显眼位置）。
     """
 
     def __init__(
@@ -102,21 +105,32 @@ class SystemPromptBuilder:
         env: Environment,
         custom_instructions: str = "",
         memory_loader: Callable[[], str] | None = None,
+        skills_summary: str = "",
+        skills_loader: Callable[[], str] | None = None,
     ) -> None:
         self._env = env
         self._custom_block = build_custom_block(custom_instructions)
         self._memory_loader = memory_loader
+        self._skills_loader = skills_loader
+        # ch13 F3：技能清单附在 stable 末尾（会话内不变，进缓存前缀，N5）
+        summary = skills_summary.strip()
+        self._stable = STABLE_TEXT + ("\n\n" + summary if summary else "")
 
     def build(self, directives: list[SwitchDirective], iteration: int) -> SystemPrompt:
-        """返回 SystemPrompt：stable=七模块；dynamic=补充块+记忆块+自定义指令块。"""
+        """返回 SystemPrompt：stable=七模块+【技能】清单；dynamic=补充块+已激活技能块+记忆块+自定义指令块。"""
         directive_texts = [d.text_for(iteration) for d in directives]
         supplement = build_supplement(self._env, directive_texts)
+        skills_block = (
+            self._skills_loader().strip() if self._skills_loader is not None else ""
+        )
         memory_block = (
             build_memory_block(self._memory_loader())
             if self._memory_loader is not None
             else ""
         )
         dynamic = "\n\n".join(
-            p for p in (supplement, memory_block, self._custom_block) if p
+            p
+            for p in (supplement, skills_block, memory_block, self._custom_block)
+            if p
         )
-        return SystemPrompt(stable=STABLE_TEXT, dynamic=dynamic)
+        return SystemPrompt(stable=self._stable, dynamic=dynamic)
