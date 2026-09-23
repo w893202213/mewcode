@@ -277,18 +277,19 @@ def _drain_notices(console: Console, notice_queue: queue.Queue) -> None:
         console.print(Text(notice, style=_TIMER_STYLE))
 
 
-def _status_toolbar(tracker: DoublePressTracker, gate: PermissionGate, agent: Agent) -> Text | None:
+def _status_toolbar(tracker: DoublePressTracker, gate: PermissionGate, agent: Agent) -> str | None:
     """状态栏：权限档英文标记 + 计划模式 [PLAN]（ch12 F4）。
 
     每次重绘直读 live 状态（0.5s 定时兜底），模式切换后立即反映；
-    Ctrl+C 双击提示激活时临时替换显示。
+    Ctrl+C 双击提示激活时临时替换显示。返回纯字符串：bottom_toolbar
+    只接受 prompt_toolkit 格式化文本（rich Text 会直接抛异常）。
     """
     if tracker.hint_active():
-        return Text(_EXIT_HINT)
+        return _EXIT_HINT
     parts = [f"[{gate.mode.value.upper()}]"]
     if agent.plan_mode:
         parts.append("[PLAN]")
-    return Text(" ".join(parts))
+    return " ".join(parts)
 
 
 def _consume_events(
