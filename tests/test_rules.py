@@ -256,3 +256,34 @@ def test_load_from_non_string_pattern_raises(tmp_path):
     rs = RuleSet()
     with pytest.raises(ConfigError, match="pattern 无效"):
         rs.load_from([bad], tmp_path / "local.yaml")
+
+
+# ---------------------------------------------------------------------------
+# 规则统计（ch12 T6）
+# ---------------------------------------------------------------------------
+
+
+def test_counts_empty():
+    assert RuleSet().counts() == (0, 0)
+
+
+def test_counts_session_rules():
+    rs = _rs(Rule("run_command", "git status", Action.ALLOW))
+    assert rs.counts() == (1, 0)
+
+
+def test_counts_file_rules(tmp_path):
+    user = tmp_path / "user.yaml"
+    _write_rules(user, Rule("run_command", "git *", Action.ALLOW))
+    rs = RuleSet()
+    rs.load_from([user], tmp_path / "local.yaml")
+    assert rs.counts() == (0, 1)
+
+
+def test_counts_mixed(tmp_path):
+    user = tmp_path / "user.yaml"
+    _write_rules(user, Rule("run_command", "git *", Action.ALLOW))
+    rs = RuleSet()
+    rs.load_from([user], tmp_path / "local.yaml")
+    rs.add(Rule("read_file", "a.txt", Action.ALLOW))
+    assert rs.counts() == (1, 1)

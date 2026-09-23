@@ -69,6 +69,13 @@ class RuleSet:
         """追加一条规则（会话规则与文件规则同集合，顺序不影响裁决）。"""
         self._rules.append(rule)
 
+    def counts(self) -> tuple[int, int]:
+        """只读统计：返回（会话规则数, 永久规则数）。
+
+        会话规则 = 全部规则减去文件来源规则（ch12 /permission show 展示用）。
+        """
+        return len(self._rules) - len(self._file_rules), len(self._file_rules)
+
     def match(self, tool: str, value: str) -> list[Action]:
         """返回该工具+值命中的全部规则裁决（按注册顺序）。"""
         return [
