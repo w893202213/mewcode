@@ -26,6 +26,7 @@ from mewcode.agent.events import (
     UsageEvent,
 )
 from mewcode.agent.executor import execute_call
+from mewcode.hooks.manager import HookManager
 # 注意：从子模块导入而非 mewcode.context 包级——包级导入 Compressor
 # 会经 agent.events 反向触发循环依赖（见 context/__init__.py 说明）
 from mewcode.context.compressor import Compressor
@@ -144,6 +145,7 @@ class Agent:
         memory_loader: Callable[[], str] | None = None,  # 记忆索引加载器（ch11 F5，每轮现取）
         skills_summary: str = "",  # 技能清单（ch13 F3，进 stable 缓存前缀）
         skill_manager: SkillManager | None = None,  # 技能管理器（ch13 F5，白名单收窄）
+        hook_manager: HookManager | None = None,  # Hook 管理器（ch15，None=零开销）
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -162,6 +164,9 @@ class Agent:
         self._pending: tuple[asyncio.Future, asyncio.AbstractEventLoop] | None = None
         # 技能管理器：激活状态与白名单（ch13）；None = 无技能收窄（行为与 ch12 一致）
         self._skill_manager = skill_manager
+        # Hook 管理器（ch15）：None = 零开销不触发；轮计数每 run() 自增
+        self._hooks = hook_manager
+        self._round_count = 0
         # 系统提示拼装器：环境快照（启动目录+平台）构造时采样，日期每次 build 现取；
         # 自定义指令来自配置（可选）；记忆索引每轮现取（ch11）；技能清单进
         # stable、已激活技能块每轮现取（ch13）
@@ -323,6 +328,19 @@ class Agent:
     def _cancelled_now(self) -> bool:
         return self._cancelled.is_set()
 
+    async def _finish(self, reason: RoundEndReason, message: str = "") -> RoundEnd:
+        """统一收尾（ch15 F2）：触发 round_end Hook 后构造 RoundEnd。"""
+        if self._hooks is not None:
+            await self._hooks.emit_async(
+                "round_end",
+                {
+                    "event": "round_end",
+                    "round": self._round_count,
+                    "reason": reason.value,
+                },
+            )
+        return RoundEnd(reason, message)
+
     async def _stream_bridged(
         self, messages: list, tools: list[Tool], system: SystemPrompt
     ) -> AsyncIterator[StreamEvent]:
@@ -361,8 +379,18 @@ class Agent:
         """
         self._cancelled.clear()
         self._pending = None
+        # ch15：轮次事件——每 run() 一轮用户输入，轮计数自增
+        self._round_count += 1
+        if self._hooks is not None:
+            await self._hooks.emit_async(
+                "round_start", {"event": "round_start", "round": self._round_count}
+            )
         start_index = len(self._session.messages)
         self._session.add_user(user_text)
+        if self._hooks is not None:
+            await self._hooks.emit_async(
+                "user_message", {"event": "user_message", "round": self._round_count}
+            )
         total_in = 0
         total_out = 0
         total_cache_hit: int | None = None  # 本轮累计缓存命中（服务端不返回则 None）
@@ -378,6 +406,17 @@ class Agent:
                 directives: list[SwitchDirective] = (
                     [PLAN_MODE_DIRECTIVE] if self._plan_mode else []
                 )
+                if self._hooks is not None:
+                    # ch15：Hook 注入的提示词随下一次请求一次性消费（全取全清）
+                    directives.extend(
+                        SwitchDirective(
+                            name="hook_inject",
+                            full_text=text,
+                            slim_text=text,
+                            repeat_every=1,
+                        )
+                        for text in self._hooks.take_injects()
+                    )
                 system = self._builder.build(directives, iteration)
                 # ch09 F4/F6：请求前检查是否逼近窗口上限——触发重量兜底；
                 # 熔断时提示但不压缩，按未压缩状态继续（N6）
@@ -466,6 +505,11 @@ class Agent:
                         ToolUse(id=c.id, name=c.name, args=c.args) for c in calls
                     ],
                 )
+                if self._hooks is not None:
+                    await self._hooks.emit_async(
+                        "assistant_message",
+                        {"event": "assistant_message", "round": self._round_count},
+                    )
                 yield UsageEvent(
                     input_tokens=total_in,
                     output_tokens=total_out,
@@ -474,7 +518,7 @@ class Agent:
                 )
                 if not calls:
                     # 停止条件①：模型不再请求工具，正常结束
-                    yield RoundEnd(RoundEndReason.OK)
+                    yield await self._finish(RoundEndReason.OK)
                     return
                 # 执行阶段（ch05 F5 + ch07 F7）：逐调用预检直通——
                 # 计划模式过滤沿用 → 闸门裁决；ALLOW 进执行队列、
@@ -510,6 +554,21 @@ class Agent:
                     if verdict.action is Action.DENY:
                         results[id(call)] = ToolResult.failure(verdict.reason)
                         continue
+                    if verdict.action is Action.ALLOW and self._hooks is not None:
+                        # ch15 F4：Hook 拦截——闸门放行路径上的补充策略；
+                        # 拒绝原因作为失败结果回灌，模型可据此调整
+                        decision = await self._hooks.emit_async(
+                            "tool_before",
+                            {
+                                "event": "tool_before",
+                                "round": self._round_count,
+                                "tool": call.name,
+                                "args": call.args,
+                            },
+                        )
+                        if not decision.allowed:
+                            results[id(call)] = ToolResult.failure(decision.reason)
+                            continue
                     if verdict.action is Action.ASK:
                         # 先登记 pending 再发事件：TUI 收到事件即可立刻应答
                         loop = asyncio.get_running_loop()
@@ -569,11 +628,22 @@ class Agent:
                     if prevent_event is not None:
                         yield prevent_event
                     yield ToolResultEvent(call, result)
+                    if self._hooks is not None:
+                        await self._hooks.emit_async(
+                            "tool_after",
+                            {
+                                "event": "tool_after",
+                                "round": self._round_count,
+                                "tool": call.name,
+                                "args": call.args,
+                                "result": {"ok": result.ok, "content": result.content},
+                            },
+                        )
                     # 停止条件④：连续调用未知工具（任何已知工具清零计数）
                     if self._is_unknown(call):
                         unknown_streak += 1
                         if unknown_streak >= UNKNOWN_TOOL_LIMIT:
-                            yield RoundEnd(
+                            yield await self._finish(
                                 RoundEndReason.UNKNOWN_TOOL,
                                 "连续调用未知工具，已停止",
                             )
@@ -581,16 +651,16 @@ class Agent:
                     else:
                         unknown_streak = 0
             # 停止条件②：循环走完仍未结束（兜底安全网）
-            yield RoundEnd(
+            yield await self._finish(
                 RoundEndReason.LIMIT, f"已达迭代上限（{self._max_iterations} 轮）"
             )
         except _Cancelled:
             # 停止条件③：用户取消（已落盘轮次保留，进行中轮次不落盘）
-            yield RoundEnd(RoundEndReason.CANCELLED, "已取消")
+            yield await self._finish(RoundEndReason.CANCELLED, "已取消")
         except ProviderError as e:
             del self._session.messages[start_index:]
-            yield RoundEnd(RoundEndReason.ERROR, str(e))
+            yield await self._finish(RoundEndReason.ERROR, str(e))
         except Exception as e:
             # 兜底：任何意外异常都以 RoundEnd 收尾，界面不会挂起
             del self._session.messages[start_index:]
-            yield RoundEnd(RoundEndReason.ERROR, f"内部错误: {e}")
+            yield await self._finish(RoundEndReason.ERROR, f"内部错误: {e}")

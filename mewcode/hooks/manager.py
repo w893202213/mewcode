@@ -53,7 +53,14 @@ class HookManager:
         """同步触发（装配层：startup/shutdown/session 级）。
 
         background 动作走 daemon 线程不阻塞；拦截类事件强制同步等待结果。
+        引擎级异常兜底：拦截事件 fail-closed、其余只记日志（F7）。
         """
+        try:
+            return self._emit_core(event, ctx)
+        except Exception as e:
+            return self._engine_fallback(event, e)
+
+    def _emit_core(self, event: str, ctx: dict) -> HookDecision:
         rules = self._by_event.get(event)
         if not rules:
             return HookDecision()  # 该事件无规则：零开销
@@ -87,8 +94,14 @@ class HookManager:
         """异步触发（主循环内：轮次/消息/工具级）。
 
         同步动作经 asyncio.to_thread 执行，不阻塞事件循环；background
-        动作走 asyncio.create_task。
+        动作走 daemon 线程。引擎级异常兜底同 emit。
         """
+        try:
+            return await self._emit_async_core(event, ctx)
+        except Exception as e:
+            return self._engine_fallback(event, e)
+
+    async def _emit_async_core(self, event: str, ctx: dict) -> HookDecision:
         rules = self._by_event.get(event)
         if not rules:
             return HookDecision()
@@ -128,6 +141,14 @@ class HookManager:
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _engine_fallback(event: str, e: Exception) -> HookDecision:
+        """引擎级异常兜底：拦截事件 fail-closed，其余只记日志放行（F7）。"""
+        logger.warning("Hook 引擎异常: 事件 %s: %s", event, e)
+        if event in INTERCEPT_EVENTS:
+            return HookDecision(allowed=False, reason=f"Hook 处理异常: {e}")
+        return HookDecision()
 
     def _pass(self, rule: HookRule, ctx: dict) -> bool:
         """前置过滤：命中返回 True；run_once 已执行/条件不命中返回 False。"""

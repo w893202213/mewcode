@@ -216,3 +216,29 @@ def test_trigger_log_has_event_and_index(caplog):
     with caplog.at_level(logging.INFO, logger="mewcode.hooks"):
         manager.emit("round_start", {"event": "round_start"})
     assert "Hook 触发: 事件 round_start 规则 #3" in caplog.text
+
+
+# ----------------------------------------------------------------------
+# 引擎级异常兜底（F7）
+# ----------------------------------------------------------------------
+
+
+def _boom(conditions, match, ctx):
+    raise RuntimeError("boom")
+
+
+def test_engine_error_non_intercept_logs_and_allows(monkeypatch, caplog):
+    monkeypatch.setattr("mewcode.hooks.manager.eval_conditions", _boom)
+    manager = HookManager([_rule("round_start", _cmd("true"))])
+    with caplog.at_level(logging.WARNING, logger="mewcode.hooks"):
+        decision = manager.emit("round_start", {"event": "round_start"})
+    assert decision.allowed is True  # 绝不中断主流程
+    assert "Hook 引擎异常" in caplog.text
+
+
+def test_engine_error_intercept_fails_closed(monkeypatch):
+    monkeypatch.setattr("mewcode.hooks.manager.eval_conditions", _boom)
+    manager = HookManager([_rule("tool_before", _cmd("true"))])
+    decision = manager.emit("tool_before", CTX)
+    assert decision.allowed is False
+    assert "boom" in decision.reason
