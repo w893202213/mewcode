@@ -7,8 +7,12 @@ from mewcode.tools.search import FindFilesTool, GrepCodeTool
 from mewcode.tools.shell import RunCommandTool
 
 
-def create_registry() -> ToolRegistry:
-    """创建并登记六个核心工具的注册中心。"""
+def create_registry(agent_tool: Tool | None = None) -> ToolRegistry:
+    """创建并登记六个核心工具的注册中心。
+
+    agent_tool（ch16）：装配层传入 AgentTool 实例才注册——缺省不注册，
+    存量测试与无委派场景行为不变。
+    """
     registry = ToolRegistry()
     for tool in (
         ReadFileTool(),
@@ -19,6 +23,8 @@ def create_registry() -> ToolRegistry:
         GrepCodeTool(),
     ):
         registry.register(tool)
+    if agent_tool is not None:
+        registry.register(agent_tool)
     return registry
 
 

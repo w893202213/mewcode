@@ -151,6 +151,7 @@ class Agent:
         interactive: bool = True,  # ch16：False=子 Agent 非交互（ASK 自动拒绝）
         allowed_tools: set[str] | None = None,  # ch16：工具名集合过滤（子 Agent 工具集）
         read_cache: FileReadCache | None = None,  # ch16：读缓存实例（隔离载体）
+        task_manager: "object | None" = None,  # ch16：任务管理器（主对话注入，agent 工具用）
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -172,10 +173,12 @@ class Agent:
         # Hook 管理器（ch15）：None = 零开销不触发；轮计数每 run() 自增
         self._hooks = hook_manager
         self._round_count = 0
-        # ch16 子 Agent 参数：非交互（ASK 自动拒绝）、工具集过滤、读缓存
+        # ch16 子 Agent 参数：非交互（ASK 自动拒绝）、工具集过滤、读缓存、
+        # 任务管理器（主对话注入；子 Agent 为 None——agent 工具已被防线剔除）
         self._interactive = interactive
         self._allowed_tools = allowed_tools
         self._read_cache = read_cache
+        self._task_manager = task_manager
         # Fork 构建复用的 stable 参数（subagent_context 取用）
         self._custom_instructions = custom_instructions
         self._skills_summary = skills_summary
@@ -353,7 +356,11 @@ class Agent:
         finally 清除防线程池线程串味。
         """
         ctx_push(
-            ParentContext(agent=self, read_cache=self._read_cache)
+            ParentContext(
+                agent=self,
+                task_manager=self._task_manager,
+                read_cache=self._read_cache,
+            )
         )
         try:
             return execute_call(self._registry, call)
