@@ -15,6 +15,7 @@ from mewcode.config import (
     load_permission_mode,
     select_profile,
 )
+from mewcode.hooks import HookManager, load_hooks
 from mewcode.mcp import McpManager, load_mcp_servers
 from mewcode.memory import build_memory_context, load_instructions
 from mewcode.permissions import PermissionGate, RuleSet
@@ -84,19 +85,21 @@ def _build_gate(config_path: str) -> PermissionGate:
 def main(argv: list[str] | None = None) -> None:
     """入口：配置错误打印到 stderr 并以非零码退出。
 
-    装配顺序（ch08 + ch11 F6 + ch12 + ch13）：providers → 闸门 → 内置工具
-    → MCP 发现注册（内部警告不抛）→ 规则工具名统一校验 → 命令注册中心
-    （冲突即启动失败）→ 技能发现（警告不阻断）→ /skill 命令注册 →
-    use_skill 注册 →
-    白名单启动校验（未知工具即退出）→ 三层指令加载 → 记忆上下文
-    （创建/恢复会话 + 过期清理）→ TUI；退出时统一关闭全部 MCP 连接
-    （终止子进程）。
+    装配顺序（ch08 + ch11 F6 + ch12 + ch13 + ch15）：providers → 闸门 →
+    Hook 规则加载校验 → 内置工具 → MCP 发现注册（内部警告不抛）→
+    规则工具名统一校验 → 命令注册中心（冲突即启动失败）→ 技能发现
+    （警告不阻断）→ /skill 命令注册 → use_skill 注册 → 白名单启动校验
+    （未知工具即退出）→ 三层指令加载 → 记忆上下文（创建/恢复会话 +
+    过期清理）→ startup Hook → TUI；退出时 shutdown Hook + 统一关闭
+    全部 MCP 连接（终止子进程）。
     """
     args = _parse_args(argv)
     try:
         configs = load_config(args.config)
         config = select_profile(configs, args.profile)
         gate = _build_gate(args.config)
+        # ch15：Hook 规则加载与集中校验（非法即启动失败，fail-closed）
+        hook_manager = HookManager(load_hooks(args.config))
         mcp_servers = load_mcp_servers(
             args.config, Path.cwd() / ".mewcode" / "config.yaml"
         )
@@ -157,6 +160,8 @@ def main(argv: list[str] | None = None) -> None:
     if memory.resume_summary:
         print(memory.resume_summary)
 
+    # ch15：系统级事件——启动（装配完成后）与退出（含异常路径）配对触发
+    hook_manager.emit("startup", {"event": "startup"})
     try:
         run(
             provider,
@@ -168,6 +173,8 @@ def main(argv: list[str] | None = None) -> None:
             command_registry=command_registry,
             skill_manager=skill_manager,
             skills_summary=skills_summary(discovered.skills),
+            hook_manager=hook_manager,
         )
     finally:
+        hook_manager.emit("shutdown", {"event": "shutdown"})
         manager.shutdown()

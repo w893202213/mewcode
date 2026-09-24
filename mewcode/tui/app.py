@@ -40,6 +40,7 @@ from mewcode.agent.events import (
     UsageEvent,
 )
 from mewcode.config import ProviderConfig
+from mewcode.hooks.manager import HookManager
 from mewcode.memory import (
     PROJECT_MEMORY_DIR,
     USER_MEMORY_DIR,
@@ -105,6 +106,7 @@ def run(
     command_registry: CommandRegistry | None = None,
     skill_manager: SkillManager | None = None,
     skills_summary: str = "",
+    hook_manager: HookManager | None = None,
 ) -> None:
     """TUI 主循环：读输入 → 分流（命令走本地分发，其余送 Agent）→ 回到输入。
 
@@ -114,6 +116,8 @@ def run(
     （cli 启动期已构建校验，冲突会在此抛异常）。
     skill_manager / skills_summary（ch13）：技能管理器（激活状态、白名单、
     技能命令注册）与技能清单（注入系统提示 stable）；None 时按无技能运行。
+    hook_manager（ch15）：Hook 管理器，None 时按无 Hook 运行；会话级事件
+    （session_start/session_end）在此触发，独立技能路径同。
     """
     if command_registry is None:
         command_registry = build_registry()
@@ -232,23 +236,31 @@ def run(
                 context_window=config.context_window,
                 skills_summary=skills_summary,
                 skill_manager=inner_manager,
+                hook_manager=hook_manager,
                 # 独立存盘子目录：避免与外层 ResultStore 序号撞车
                 context_dir=root / ".mewcode" / "context" / "skills",
             )
+            # ch15：独立会话同样触发会话级事件（会话/轮次/消息/工具级生效）
+            if hook_manager is not None:
+                hook_manager.emit("session_start", {"event": "session_start"})
             start_index = len(inner_session.messages)
             task_text = args or f"请执行技能 {name}"
-            end = _agent_round(
-                console,
-                inner_agent,
-                task_text,
-                tracker,
-                gate,
-                inner_session,
-                log=None,
-                updater=None,
-                ui=ui,
-                prefix=f"[bold magenta]🐱 MewCode[/bold magenta]（技能 {name} 独立执行）",
-            )
+            try:
+                end = _agent_round(
+                    console,
+                    inner_agent,
+                    task_text,
+                    tracker,
+                    gate,
+                    inner_session,
+                    log=None,
+                    updater=None,
+                    ui=ui,
+                    prefix=f"[bold magenta]🐱 MewCode[/bold magenta]（技能 {name} 独立执行）",
+                )
+            finally:
+                if hook_manager is not None:
+                    hook_manager.emit("session_end", {"event": "session_end"})
             # 摘要 = 独立对话新增消息中最后一条助手回复；失败回流失败说明
             summary = None
             for m in reversed(inner_session.messages[start_index:]):
@@ -291,28 +303,35 @@ def run(
         )
         _print_welcome(console, config, gate, memory.resume_summary if memory else "")
 
-        while True:
-            try:
-                text = prompt_session.prompt()
-            except KeyboardInterrupt:
-                continue  # 非按键来源的 SIGINT 安全网；按键 Ctrl+C 已被自定义绑定接管
-            except EOFError:
-                console.print("再见！👋")
-                return
-            if text is ExitSignal.EXIT:
-                return  # 双击 Ctrl+C：正常退出，回到 CLI
-            # ch11：先打印上轮异步笔记更新的提示（若有），再处理本次输入
-            _drain_notices(console, notice_queue)
-            # ch12 F5 回车入口分流器：斜杠命令走本地分发，其余送 Agent
-            parsed = parse_command(text)
-            if parsed is None:
-                if not text.strip():
-                    continue  # 空白输入早返回
-                _run_agent_round(text)
-                _drain_pending_independent()  # ch13 F8：本轮结束后执行登记的独立技能
-                continue
-            if dispatch(command_registry, parsed, ui) is CommandResult.EXIT:
-                return
+        # ch15：会话级事件——主循环前后配对触发，覆盖全部退出路径
+        if hook_manager is not None:
+            hook_manager.emit("session_start", {"event": "session_start"})
+        try:
+            while True:
+                try:
+                    text = prompt_session.prompt()
+                except KeyboardInterrupt:
+                    continue  # 非按键来源的 SIGINT 安全网；按键 Ctrl+C 已被自定义绑定接管
+                except EOFError:
+                    console.print("再见！👋")
+                    return
+                if text is ExitSignal.EXIT:
+                    return  # 双击 Ctrl+C：正常退出，回到 CLI
+                # ch11：先打印上轮异步笔记更新的提示（若有），再处理本次输入
+                _drain_notices(console, notice_queue)
+                # ch12 F5 回车入口分流器：斜杠命令走本地分发，其余送 Agent
+                parsed = parse_command(text)
+                if parsed is None:
+                    if not text.strip():
+                        continue  # 空白输入早返回
+                    _run_agent_round(text)
+                    _drain_pending_independent()  # ch13 F8：本轮结束后执行登记的独立技能
+                    continue
+                if dispatch(command_registry, parsed, ui) is CommandResult.EXIT:
+                    return
+        finally:
+            if hook_manager is not None:
+                hook_manager.emit("session_end", {"event": "session_end"})
 
 
 def _agent_round(
