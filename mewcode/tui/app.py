@@ -179,7 +179,7 @@ def run(
         message=[("class:prompt", "❯ ")],
         completer=CommandCompleter(command_registry),
         key_bindings=kb,
-        bottom_toolbar=lambda: _status_toolbar(tracker, gate, agent),
+        bottom_toolbar=lambda: _status_toolbar(tracker, gate, agent, task_manager),
         refresh_interval=0.5,
     )
 
@@ -353,6 +353,9 @@ def run(
                     return
                 if text is ExitSignal.EXIT:
                     return  # 双击 Ctrl+C：正常退出，回到 CLI
+                # ch16 F9：空闲期间完成的子 Agent 在交互恢复时最先注入并续轮
+                # （后台任务无法打断 prompt 阻塞，状态栏有提示）
+                _drain_completed_tasks()
                 # ch11：先打印上轮异步笔记更新的提示（若有），再处理本次输入
                 _drain_notices(console, notice_queue)
                 # ch12 F5 回车入口分流器：斜杠命令走本地分发，其余送 Agent
@@ -433,11 +436,17 @@ def _drain_notices(console: Console, notice_queue: queue.Queue) -> None:
         console.print(Text(notice, style=_TIMER_STYLE))
 
 
-def _status_toolbar(tracker: DoublePressTracker, gate: PermissionGate, agent: Agent) -> str | None:
+def _status_toolbar(
+    tracker: DoublePressTracker,
+    gate: PermissionGate,
+    agent: Agent,
+    task_manager: "TaskManager | None" = None,
+) -> str | None:
     """状态栏：权限档英文标记 + 计划模式 [PLAN]（ch12 F4）。
 
     每次重绘直读 live 状态（0.5s 定时兜底），模式切换后立即反映；
-    Ctrl+C 双击提示激活时临时替换显示。返回纯字符串：bottom_toolbar
+    Ctrl+C 双击提示激活时临时替换显示。ch16：有已完成待注入的子 Agent
+    任务时显示提示（结果在下次交互时注入）。返回纯字符串：bottom_toolbar
     只接受 prompt_toolkit 格式化文本（rich Text 会直接抛异常）。
     """
     if tracker.hint_active():
@@ -445,6 +454,8 @@ def _status_toolbar(tracker: DoublePressTracker, gate: PermissionGate, agent: Ag
     parts = [f"[{gate.mode.value.upper()}]"]
     if agent.plan_mode:
         parts.append("[PLAN]")
+    if task_manager is not None and task_manager.pending_count():
+        parts.append(f"[{task_manager.pending_count()} 个子 Agent 已完成]")
     return " ".join(parts)
 
 

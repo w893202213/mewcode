@@ -168,6 +168,10 @@ class TaskManager:
                 break
         return drained
 
+    def pending_count(self) -> int:
+        """待注入的完成通知数（状态栏提示用，ch16 F9）。"""
+        return self._completed.qsize()
+
     # ------------------------------------------------------------------
     # 子 Agent 构建（F3/F4/F7）
     # ------------------------------------------------------------------
