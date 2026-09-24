@@ -26,7 +26,9 @@ from mewcode.agent.events import (
     UsageEvent,
 )
 from mewcode.agent.executor import execute_call
+from mewcode.agents.context import ParentContext, clear as ctx_clear, push as ctx_push
 from mewcode.hooks.manager import HookDecision, HookManager
+from mewcode.tools.files import FileReadCache
 # 注意：从子模块导入而非 mewcode.context 包级——包级导入 Compressor
 # 会经 agent.events 反向触发循环依赖（见 context/__init__.py 说明）
 from mewcode.context.compressor import Compressor
@@ -146,6 +148,9 @@ class Agent:
         skills_summary: str = "",  # 技能清单（ch13 F3，进 stable 缓存前缀）
         skill_manager: SkillManager | None = None,  # 技能管理器（ch13 F5，白名单收窄）
         hook_manager: HookManager | None = None,  # Hook 管理器（ch15，None=零开销）
+        interactive: bool = True,  # ch16：False=子 Agent 非交互（ASK 自动拒绝）
+        allowed_tools: set[str] | None = None,  # ch16：工具名集合过滤（子 Agent 工具集）
+        read_cache: FileReadCache | None = None,  # ch16：读缓存实例（隔离载体）
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -167,11 +172,21 @@ class Agent:
         # Hook 管理器（ch15）：None = 零开销不触发；轮计数每 run() 自增
         self._hooks = hook_manager
         self._round_count = 0
+        # ch16 子 Agent 参数：非交互（ASK 自动拒绝）、工具集过滤、读缓存
+        self._interactive = interactive
+        self._allowed_tools = allowed_tools
+        self._read_cache = read_cache
+        # Fork 构建复用的 stable 参数（subagent_context 取用）
+        self._custom_instructions = custom_instructions
+        self._skills_summary = skills_summary
+        self._memory_loader = memory_loader
         # 系统提示拼装器：环境快照（启动目录+平台）构造时采样，日期每次 build 现取；
         # 自定义指令来自配置（可选）；记忆索引每轮现取（ch11）；技能清单进
-        # stable、已激活技能块每轮现取（ch13）
+        # stable、已激活技能块每轮现取（ch13）。env 存成员供 ch16 Fork 复用
+        # （stable 逐字节一致的前提）
+        self._env = Environment(cwd=_safe_cwd(), platform=platform.platform())
         self._builder = SystemPromptBuilder(
-            Environment(cwd=_safe_cwd(), platform=platform.platform()),
+            self._env,
             custom_instructions=custom_instructions,
             memory_loader=memory_loader,
             skills_summary=skills_summary,
@@ -308,6 +323,9 @@ class Agent:
         if self._skill_manager is not None and self._skill_manager.whitelist_active():
             allowed = self._skill_manager.whitelist() | {USE_SKILL_TOOL_NAME}
             tools = [t for t in tools if t.name in allowed]
+        if self._allowed_tools is not None:
+            # ch16：子 Agent 工具集（TaskManager 计算好最终集合传入）
+            tools = [t for t in tools if t.name in self._allowed_tools]
         return tools
 
     def _is_read_only(self, call: ToolCall) -> bool:
@@ -327,6 +345,36 @@ class Agent:
 
     def _cancelled_now(self) -> bool:
         return self._cancelled.is_set()
+
+    def _run_call(self, call: ToolCall):
+        """工具执行包装（to_thread 参数）：注入本 Agent 的父上下文与读缓存。
+
+        ch16：工具与 Hook 动作经 threading.local 拿到 Agent 引用/读缓存；
+        finally 清除防线程池线程串味。
+        """
+        ctx_push(
+            ParentContext(agent=self, read_cache=self._read_cache)
+        )
+        try:
+            return execute_call(self._registry, call)
+        finally:
+            ctx_clear()
+
+    def subagent_context(self) -> dict:
+        """ch16 Fork 构建用快照：消息副本、可见工具、当前档位与 stable 参数。
+
+        TaskManager 构造 Fork 子 Agent 时取用——消息逐字节一致与 stable
+        一致是 Fork 首请求缓存命中的前提。
+        """
+        return {
+            "messages": list(self._session.messages),
+            "visible_tools": self._visible_tools(),
+            "permission_mode": self._gate.mode,
+            "custom_instructions": self._custom_instructions,
+            "skills_summary": self._skills_summary,
+            "memory_loader": self._memory_loader,
+            "env": self._env,
+        }
 
     async def _finish(self, reason: RoundEndReason, message: str = "") -> RoundEnd:
         """统一收尾（ch15 F2）：触发 round_end Hook 后构造 RoundEnd。"""
@@ -579,6 +627,13 @@ class Agent:
                         if not decision.allowed:
                             results[id(call)] = ToolResult.failure(decision.reason)
                             continue
+                    if verdict.action is Action.ASK and not self._interactive:
+                        # ch16 F6：子 Agent 非交互——不发出询问事件、不挂起，
+                        # 直接拒绝回灌，模型改用只读工具或规则内工具
+                        results[id(call)] = ToolResult.failure(
+                            "非交互模式无法人工确认，已拒绝"
+                        )
+                        continue
                     if verdict.action is Action.ASK:
                         # 先登记 pending 再发事件：TUI 收到事件即可立刻应答
                         loop = asyncio.get_running_loop()
@@ -608,7 +663,7 @@ class Agent:
                 side_effect = [c for c, f in zip(planned, readonly_flags) if not f]
                 ro_results = await asyncio.gather(
                     *(
-                        asyncio.to_thread(execute_call, self._registry, c)
+                        asyncio.to_thread(self._run_call, c)
                         for c in readonly
                     )
                 )
@@ -617,7 +672,7 @@ class Agent:
                 side_results: list = []
                 for call in side_effect:
                     side_results.append(
-                        await asyncio.to_thread(execute_call, self._registry, call)
+                        await asyncio.to_thread(self._run_call, call)
                     )
                     if self._cancelled_now():
                         raise _Cancelled()

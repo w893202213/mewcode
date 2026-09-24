@@ -69,6 +69,14 @@ class RuleSet:
         """追加一条规则（会话规则与文件规则同集合，顺序不影响裁决）。"""
         self._rules.append(rule)
 
+    def add_all(self, rules: list[Rule]) -> None:
+        """批量追加规则（ch16 子 Agent 复制文件规则用）。
+
+        不进 _file_rules——validate_tools 只校验真实文件来源，复制的
+        副本无需重复校验。
+        """
+        self._rules.extend(rules)
+
     def counts(self) -> tuple[int, int]:
         """只读统计：返回（会话规则数, 永久规则数）。
 

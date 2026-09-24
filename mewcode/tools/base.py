@@ -11,6 +11,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import ClassVar
 
+from mewcode.agents.context import clear, current, push
+
 # 回灌给模型与展示在 TUI 的工具结果长度上限（spec N2）
 RESULT_MAX_CHARS = 30000
 
@@ -66,14 +68,22 @@ def run_tool(tool: Tool, args: dict) -> ToolResult:
 
     线程超时后无法强杀，守护线程会在后台自然结束；命令类工具
     自身另有 subprocess 超时兜底，保证子进程不会悬挂。
+    ch16：捕获调用线程的 ParentContext（读缓存/父 Agent）并在执行
+    线程内重设——threading.local 不跨线程。
     """
     box: dict = {}
+    ctx = current()  # 调用线程上下文（无则 None，执行线程同样无）
 
     def _execute() -> None:
+        if ctx is not None:
+            push(ctx)
         try:
             box["result"] = tool.execute(args)
         except Exception as e:  # 工具实现抛出的任何异常都转为错误结果（spec F7）
             box["result"] = ToolResult.failure(f"工具执行异常: {e}")
+        finally:
+            if ctx is not None:
+                clear()
 
     thread = threading.Thread(target=_execute, daemon=True)
     thread.start()
