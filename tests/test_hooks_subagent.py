@@ -1,5 +1,6 @@
 """Hook subagent 动作对接测试（ch16 F10）：真实启动、role 缺省、无上下文占位。"""
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -108,6 +109,32 @@ def test_exec_subagent_uses_specified_role(tmp_path):
         clear()
     assert result.ok is True
     assert manager.snapshot()[0].role == "custom"
+
+
+def test_exec_subagent_via_to_thread_sees_context(tmp_path):
+    """生产路径回归：Hook 动作经 asyncio.to_thread 执行（manager 内部调度），
+    contextvars 随线程复制——subagent 动作仍能拿到 TaskManager。
+
+    修复背景：threading.local 不跨线程，该路径曾永远退回占位
+    （单测因主线程直接 push 而误绿，e2e 审查发现）。
+    """
+
+    def handler(n, messages, tools):
+        return [PTextDelta("完成"), Done()]
+
+    manager, parent = _env(tmp_path, handler)
+    push(ParentContext(agent=parent, task_manager=manager, read_cache=None))
+    try:
+        result = asyncio.run(
+            asyncio.to_thread(
+                exec_subagent, HookAction(type="subagent", prompt="检查代码")
+            )
+        )
+    finally:
+        clear()
+    assert result.ok is True
+    assert "任务 #1" in result.message
+    assert manager.snapshot()[0].role == "general"
 
 
 def test_exec_subagent_without_context_falls_back(caplog):

@@ -26,7 +26,11 @@ from mewcode.agent.events import (
     UsageEvent,
 )
 from mewcode.agent.executor import execute_call
-from mewcode.agents.context import ParentContext, clear as ctx_clear, push as ctx_push
+from mewcode.agents.context import (
+    ParentContext,
+    push as ctx_push,
+    restore as ctx_restore,
+)
 from mewcode.hooks.manager import HookDecision, HookManager
 from mewcode.tools.files import FileReadCache
 # 注意：从子模块导入而非 mewcode.context 包级——包级导入 Compressor
@@ -352,10 +356,10 @@ class Agent:
     def _run_call(self, call: ToolCall):
         """工具执行包装（to_thread 参数）：注入本 Agent 的父上下文与读缓存。
 
-        ch16：工具与 Hook 动作经 threading.local 拿到 Agent 引用/读缓存；
-        finally 清除防线程池线程串味。
+        ch16：contextvars 随 asyncio.to_thread 复制线程，工具与 Hook 动作
+        在执行路径拿到 Agent 引用/读缓存；restore 恢复外层上下文（嵌套安全）。
         """
-        ctx_push(
+        token = ctx_push(
             ParentContext(
                 agent=self,
                 task_manager=self._task_manager,
@@ -365,7 +369,22 @@ class Agent:
         try:
             return execute_call(self._registry, call)
         finally:
-            ctx_clear()
+            ctx_restore(token)
+
+    async def _emit_hook(self, event: str, ctx: dict) -> HookDecision:
+        """触发 Hook 的统一包装（ch16 F10）：压入父上下文再 emit。
+
+        manager 内部经 asyncio.to_thread 执行动作，contextvars 随线程
+        复制——hook subagent 动作据此拿到 TaskManager；子 Agent 的
+        task_manager 为 None，其 hook subagent 动作自然退回占位（防嵌套）。
+        """
+        if self._hooks is None:
+            return HookDecision()
+        token = ctx_push(ParentContext(agent=self, task_manager=self._task_manager))
+        try:
+            return await self._hooks.emit_async(event, ctx)
+        finally:
+            ctx_restore(token)
 
     def subagent_context(self) -> dict:
         """ch16 Fork 构建用快照：消息副本、可见工具、当前档位与 stable 参数。
@@ -385,8 +404,7 @@ class Agent:
 
     async def _finish(self, reason: RoundEndReason, message: str = "") -> RoundEnd:
         """统一收尾（ch15 F2）：触发 round_end Hook 后构造 RoundEnd。"""
-        if self._hooks is not None:
-            await self._hooks.emit_async(
+        await self._emit_hook(
                 "round_end",
                 {
                     "event": "round_end",
@@ -402,9 +420,7 @@ class Agent:
         闸门放行与人工应答放行两条路径都过此检查——补充策略不因
         询问而旁路。
         """
-        if self._hooks is None:
-            return HookDecision()
-        return await self._hooks.emit_async(
+        return await self._emit_hook(
             "tool_before",
             {
                 "event": "tool_before",
@@ -454,14 +470,12 @@ class Agent:
         self._pending = None
         # ch15：轮次事件——每 run() 一轮用户输入，轮计数自增
         self._round_count += 1
-        if self._hooks is not None:
-            await self._hooks.emit_async(
+        await self._emit_hook(
                 "round_start", {"event": "round_start", "round": self._round_count}
             )
         start_index = len(self._session.messages)
         self._session.add_user(user_text)
-        if self._hooks is not None:
-            await self._hooks.emit_async(
+        await self._emit_hook(
                 "user_message", {"event": "user_message", "round": self._round_count}
             )
         total_in = 0
@@ -578,11 +592,10 @@ class Agent:
                         ToolUse(id=c.id, name=c.name, args=c.args) for c in calls
                     ],
                 )
-                if self._hooks is not None:
-                    await self._hooks.emit_async(
-                        "assistant_message",
-                        {"event": "assistant_message", "round": self._round_count},
-                    )
+                await self._emit_hook(
+                    "assistant_message",
+                    {"event": "assistant_message", "round": self._round_count},
+                )
                 yield UsageEvent(
                     input_tokens=total_in,
                     output_tokens=total_out,
@@ -707,17 +720,16 @@ class Agent:
                     if prevent_event is not None:
                         yield prevent_event
                     yield ToolResultEvent(call, result)
-                    if self._hooks is not None:
-                        await self._hooks.emit_async(
-                            "tool_after",
-                            {
-                                "event": "tool_after",
-                                "round": self._round_count,
-                                "tool": call.name,
-                                "args": call.args,
-                                "result": {"ok": result.ok, "content": result.content},
-                            },
-                        )
+                    await self._emit_hook(
+                        "tool_after",
+                        {
+                            "event": "tool_after",
+                            "round": self._round_count,
+                            "tool": call.name,
+                            "args": call.args,
+                            "result": {"ok": result.ok, "content": result.content},
+                        },
+                    )
                     # 停止条件④：连续调用未知工具（任何已知工具清零计数）
                     if self._is_unknown(call):
                         unknown_streak += 1
