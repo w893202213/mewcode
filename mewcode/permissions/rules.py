@@ -77,6 +77,10 @@ class RuleSet:
         """
         self._rules.extend(rules)
 
+    def file_rules(self) -> list[Rule]:
+        """文件来源规则副本（ch16 子 Agent 独立 RuleSet 复制用）。"""
+        return list(self._file_rules)
+
     def counts(self) -> tuple[int, int]:
         """只读统计：返回（会话规则数, 永久规则数）。
 

@@ -39,6 +39,7 @@ from mewcode.agent.events import (
     ToolResultEvent,
     UsageEvent,
 )
+from mewcode.agents.manager import TaskManager, TaskStatus
 from mewcode.config import ProviderConfig
 from mewcode.hooks.manager import HookManager
 from mewcode.memory import (
@@ -48,7 +49,7 @@ from mewcode.memory import (
     NoteManager,
     NoteUpdater,
 )
-from mewcode.commands.builtins import build_registry
+from mewcode.commands.builtins import build_registry, register_tasks_command
 from mewcode.commands.dispatch import CommandResult, dispatch
 from mewcode.commands.parser import parse_command
 from mewcode.commands.registry import CommandRegistry
@@ -107,6 +108,7 @@ def run(
     skill_manager: SkillManager | None = None,
     skills_summary: str = "",
     hook_manager: HookManager | None = None,
+    task_manager: "TaskManager | None" = None,
 ) -> None:
     """TUI 主循环：读输入 → 分流（命令走本地分发，其余送 Agent）→ 回到输入。
 
@@ -118,6 +120,8 @@ def run(
     技能命令注册）与技能清单（注入系统提示 stable）；None 时按无技能运行。
     hook_manager（ch15）：Hook 管理器，None 时按无 Hook 运行；会话级事件
     （session_start/session_end）在此触发，独立技能路径同。
+    task_manager（ch16）：子 Agent 任务管理器，None 时按无委派运行；
+    完成通知轮末注入主历史并自动续轮。
     """
     if command_registry is None:
         command_registry = build_registry()
@@ -129,6 +133,9 @@ def run(
     # ch13 F7：技能命令注册到命令中心（激活时经管理器登记；撞内置名跳过）
     if skill_manager is not None:
         skill_manager.attach_registry(command_registry)
+    # ch16 F8：/tasks 命令（无任务管理器时按无委派运行，不注册）
+    if task_manager is not None:
+        register_tasks_command(command_registry, task_manager)
     agent = Agent(
         provider,
         registry,
@@ -140,6 +147,7 @@ def run(
         skills_summary=skills_summary,
         skill_manager=skill_manager,
         hook_manager=hook_manager,  # ch15：主 Agent 接入 Hook
+        task_manager=task_manager,  # ch16：主对话注入（agent 工具用）
     )
     # ch11 F5：轮自然结束后异步更新记忆；提示经队列送回主线程打印
     notice_queue: queue.Queue[str] = queue.Queue()
@@ -288,6 +296,33 @@ def run(
             if pending is not None:
                 _run_independent_skill(*pending)
 
+        def _drain_completed_tasks() -> None:
+            """轮末取走已完成的后台子 Agent（ch16 F9）：结果注入主历史 +
+            自动续一轮让主 Agent 汇报或继续。主对话运行中不打断（轮末处理）。
+            """
+            if task_manager is None:
+                return
+            completed = task_manager.drain_completed()
+            if not completed:
+                return
+            for task in completed:
+                label = "fork" if task.kind == "fork" else (task.role or "?")
+                status = "完成" if task.status is TaskStatus.DONE else "失败"
+                notice = (
+                    f"【子 Agent 结果：{label}（任务 #{task.id}，{status}）】\n"
+                    f"{task.result or '（无输出）'}"
+                )
+                session.add_user(notice)
+                console.print(
+                    Panel(
+                        notice,
+                        title=f"[bold]子 Agent {task.id} {status}[/bold]",
+                        border_style="green" if task.status is TaskStatus.DONE else "red",
+                    )
+                )
+            # 全部注入后自动续一轮（ch13 摘要回流同款）
+            _run_agent_round("子 Agent 任务已完成，结果已附在上文，请继续。")
+
         # ch12 F4：命令处理函数与渲染框架之间的唯一桥梁
         ui = TuiUiController(
             console=console,
@@ -327,6 +362,7 @@ def run(
                         continue  # 空白输入早返回
                     _run_agent_round(text)
                     _drain_pending_independent()  # ch13 F8：本轮结束后执行登记的独立技能
+                    _drain_completed_tasks()  # ch16 F9：注入完成的后台任务结果并续轮
                     continue
                 if dispatch(command_registry, parsed, ui) is CommandResult.EXIT:
                     return

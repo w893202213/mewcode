@@ -6,7 +6,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from mewcode.commands.builtins import build_registry, register_skill_command
+from mewcode.agents.discover import discover_agents
+from mewcode.agents.manager import TaskManager
+from mewcode.commands.builtins import (
+    build_registry,
+    register_skill_command,
+    register_tasks_command,
+)
 from mewcode.commands.registry import CommandConflictError
 from mewcode.config import (
     ConfigError,
@@ -29,12 +35,15 @@ from mewcode.skills.discover import (
 from mewcode.skills.manager import SkillManager
 from mewcode.skills.use_skill import UseSkillTool
 from mewcode.tools import create_registry
+from mewcode.tools.agent import AgentTool
 from mewcode.tui.app import run
 
 # 配置文件默认路径
 DEFAULT_CONFIG_PATH = Path.home() / ".mewcode" / "config.yaml"
 # 用户目录（三层指令与用户级记忆的根）
 USER_DIR = Path.home() / ".mewcode"
+# 内置角色目录（随包分发，ch16）
+BUILTIN_AGENTS_DIR = Path(__file__).resolve().parent / "agents"
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -63,10 +72,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _build_gate(config_path: str) -> PermissionGate:
+def _build_gate(config_path: str) -> tuple[PermissionGate, list]:
     """装配权限闸门：三规则文件合并读取 + 启动档位（ch07 F3/F4）。
 
     规则文件损坏或 permission_mode 非法抛 ConfigError（fail-closed）。
+    返回 (闸门, 文件规则副本)——副本供 ch16 子 Agent 独立 RuleSet 复制
+    （会话规则不传入）。
     """
     root = Path.cwd()
     local_path = root / ".mewcode" / "permissions.local.yaml"
@@ -79,7 +90,8 @@ def _build_gate(config_path: str) -> PermissionGate:
         ],
         local_path,
     )
-    return PermissionGate(root.resolve(), rules, load_permission_mode(config_path))
+    gate = PermissionGate(root.resolve(), rules, load_permission_mode(config_path))
+    return gate, rules.file_rules()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -97,7 +109,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         configs = load_config(args.config)
         config = select_profile(configs, args.profile)
-        gate = _build_gate(args.config)
+        gate, file_rules = _build_gate(args.config)
         # ch15：Hook 规则加载与集中校验（非法即启动失败，fail-closed）
         hook_manager = HookManager(load_hooks(args.config))
         mcp_servers = load_mcp_servers(
@@ -160,6 +172,24 @@ def main(argv: list[str] | None = None) -> None:
     if memory.resume_summary:
         print(memory.resume_summary)
 
+    # ch16：角色发现（警告不阻断）→ 任务管理器 → agent 工具与 /tasks 注册
+    agent_roles = discover_agents(project_root, USER_DIR, BUILTIN_AGENTS_DIR)
+    for warning in agent_roles.warnings:
+        print(f"警告: {warning}", file=sys.stderr)
+    task_manager = TaskManager(
+        agent_roles.roles,
+        configs,
+        config,
+        provider,
+        registry,
+        hook_manager,
+        file_rules,
+        project_root,
+        memory_loader=memory.memory_loader if memory is not None else None,
+    )
+    registry.register(AgentTool())
+    register_tasks_command(command_registry, task_manager)
+
     # ch15：系统级事件——启动（装配完成后）与退出（含异常路径）配对触发
     hook_manager.emit("startup", {"event": "startup"})
     try:
@@ -174,6 +204,7 @@ def main(argv: list[str] | None = None) -> None:
             skill_manager=skill_manager,
             skills_summary=skills_summary(discovered.skills),
             hook_manager=hook_manager,
+            task_manager=task_manager,
         )
     finally:
         hook_manager.emit("shutdown", {"event": "shutdown"})
