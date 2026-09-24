@@ -1,6 +1,8 @@
 """文件工具：读文件、写文件、改文件（原文唯一匹配替换）。
 
 相对路径以进程工作目录为基准解析（spec N3）；错误信息一律中文、可操作。
+read_file 支持进程内读缓存（ch16 F5）：路径 + mtime 键控，缓存实例经
+ParentContext 注入（归属 Agent 实例，父与子互不可见）。
 """
 
 from __future__ import annotations
@@ -8,7 +10,35 @@ from __future__ import annotations
 from pathlib import Path
 from typing import ClassVar
 
+from mewcode.agents.context import current
 from mewcode.tools.base import Tool, ToolResult
+
+
+class FileReadCache:
+    """read_file 的进程内读缓存：dict 以路径为键存 (mtime, content)。
+
+    命中 = 键存在且 mtime 一致——文件修改（mtime 变）自然失效，
+    无需写失效通知；进程内有效（ch16 F5）。
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, tuple[float, str]] = {}
+
+    def get(self, path: str, mtime: float) -> str | None:
+        """命中返回缓存内容；键缺失或 mtime 不一致返回 None。"""
+        hit = self._store.get(path)
+        if hit is not None and hit[0] == mtime:
+            return hit[1]
+        return None
+
+    def put(self, path: str, mtime: float, content: str) -> None:
+        self._store[path] = (mtime, content)
+
+
+def _current_cache() -> FileReadCache | None:
+    """取当前线程的读缓存实例（经 ParentContext 注入）；无上下文为 None。"""
+    ctx = current()
+    return ctx.read_cache if ctx is not None else None
 
 
 class ReadFileTool(Tool):
@@ -34,16 +64,38 @@ class ReadFileTool(Tool):
         if not path.is_file():
             return ToolResult.failure(f"文件不存在: {path}")
         try:
+            mtime = path.stat().st_mtime
+        except OSError as e:
+            return ToolResult.failure(f"读取失败 {path}: {e}")
+        # ch16 F5：读缓存——命中直接返回缓存内容（limit 截断仍在取回后应用，
+        # 不同 limit 的请求共享同一份全文缓存）
+        cache = _current_cache()
+        if cache is not None:
+            cached = cache.get(str(path), mtime)
+            if cached is not None:
+                return ToolResult.success(self._apply_limit(cached, args))
+        try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
             return ToolResult.failure(f"读取失败 {path}: {e}")
+        if cache is not None:
+            cache.put(str(path), mtime, text)
+        return ToolResult.success(self._apply_limit(text, args))
+
+    @staticmethod
+    def _apply_limit(text: str, args: dict) -> str:
+        """limit 截断（缓存命中与直读共用）。"""
         limit = args.get("limit")
-        if limit is not None:
-            lines = text.splitlines()
-            if len(lines) > limit:
-                text = "\n".join(lines[:limit])
-                text += f"\n…（已截断，共 {len(lines)} 行，只显示前 {limit} 行）"
-        return ToolResult.success(text)
+        if limit is None:
+            return text
+        lines = text.splitlines()
+        if len(lines) > limit:
+            truncated = "\n".join(lines[:limit])
+            return (
+                truncated
+                + f"\n…（已截断，共 {len(lines)} 行，只显示前 {limit} 行）"
+            )
+        return text
 
 
 class WriteFileTool(Tool):
