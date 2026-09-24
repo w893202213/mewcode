@@ -47,9 +47,32 @@ def exec_inject(action: HookAction) -> ActionResult:
 
 
 def exec_subagent(action: HookAction) -> ActionResult:
-    """子 Agent：占位动作（ch15 不做真实运行），日志后返回成功。"""
-    logger.info("Hook 子 Agent 动作占位，暂不执行（待 SubAgent 章节对接）")
-    return ActionResult(ok=True, message="子 Agent 动作占位")
+    """子 Agent：真实启动定义式子 Agent（ch16 F10 对接 ch15 占位）。
+
+    经 ParentContext 取 TaskManager（主对话工具执行线程内有效）；取不到
+    （装配外场景或子 Agent 线程内——防嵌套）退回占位日志。启动即返回，
+    不等子 Agent 完成——Hook 动作不能长时间阻塞主流程。
+    """
+    from mewcode.agents.context import current
+
+    ctx = current()
+    if ctx is None or ctx.task_manager is None:
+        logger.info(
+            "Hook 子 Agent 动作无任务管理器上下文，退回占位（ch16 防嵌套）"
+        )
+        return ActionResult(ok=True, message="子 Agent 动作占位")
+    task, err = ctx.task_manager.start(
+        "defined",
+        action.role or "general",
+        action.prompt,
+        background=True,
+        parent_agent=ctx.agent,
+    )
+    if task is None:
+        logger.warning("Hook 子 Agent 动作启动失败: %s", err)
+        return ActionResult(ok=True, message=err)
+    logger.info("Hook 子 Agent 动作已启动: 任务 #%d", task.id)
+    return ActionResult(ok=True, message=f"子 Agent 已启动（任务 #{task.id}）")
 
 
 def exec_command(action: HookAction, ctx: dict, timeout: float) -> ActionResult:

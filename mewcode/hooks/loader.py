@@ -66,7 +66,8 @@ class HookAction:
 
     type: str  # "command" | "inject" | "http" | "subagent"
     run: str = ""  # command 的命令串
-    prompt: str = ""  # inject 的静态文本 / subagent 占位提示
+    prompt: str = ""  # inject 的静态文本 / subagent 的任务描述
+    role: str = ""  # subagent 的角色名（ch16；空=缺省 general）
     url: str = ""  # http 的地址（仅 http/https）
     method: str = "GET"  # GET/POST/PUT/DELETE
     headers: dict = field(default_factory=dict)
@@ -155,7 +156,10 @@ def _parse_action(act, num: int) -> HookAction:
         prompt = act.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             raise _err(num, f"{atype} 动作需要非空 prompt: {prompt!r}")
-        return HookAction(type=atype, prompt=prompt)
+        role = act.get("role", "")
+        if not isinstance(role, str):
+            raise _err(num, f"{atype} 动作的 role 必须是字符串: {role!r}")
+        return HookAction(type=atype, prompt=prompt, role=role)
     # http
     url = act.get("url")
     if not isinstance(url, str) or not (
