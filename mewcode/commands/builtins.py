@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Callable
 
 from mewcode.commands.dispatch import CommandResult
@@ -340,3 +341,73 @@ def build_registry() -> CommandRegistry:
     if problems:
         raise CommandConflictError(problems)
     return registry
+
+
+# ----------------------------------------------------------------------
+# /tasks（ch16 F8）
+# ----------------------------------------------------------------------
+
+_TASK_STATUS_LABELS = {
+    "running": "运行中",
+    "done": "已完成",
+    "failed": "失败",
+}
+
+
+def render_task_list(tasks: list) -> str:
+    """子 Agent 任务列表文本（ch16 F8）：编号/角色/状态/耗时/用量/结果摘要。"""
+    if not tasks:
+        return "没有进行中的子 Agent 任务。"
+    lines = ["子 Agent 任务："]
+    for task in tasks:
+        label = task.kind if task.kind == "fork" else (task.role or "?")
+        status = _TASK_STATUS_LABELS.get(task.status.value, task.status.value)
+        elapsed = time.monotonic() - task.started_at
+        bg = "后台" if task.background else "同步"
+        lines.append(
+            f"  #{task.id:<3} {label:<14} [{status}·{bg}]"
+            f" {elapsed:.0f}s 入{task.usage_in}/出{task.usage_out}"
+        )
+        if task.result and task.status.value != "running":
+            summary = task.result.replace("\n", " ")[:60]
+            lines.append(f"       结果: {summary}")
+    return "\n".join(lines)
+
+
+def make_tasks_handler(manager) -> Callable[
+    [ParsedCommand, UiController], CommandResult | None
+]:
+    """/tasks 命令处理器（ch16）：闭包捕获任务管理器，现取任务快照。
+
+    `/tasks detach <id>` 把进行中的同步任务切后台；其余显示列表。
+    """
+
+    def cmd_tasks(cmd: ParsedCommand, ui: UiController) -> CommandResult | None:
+        args = cmd.args.strip()
+        if args.startswith("detach"):
+            raw_id = args[len("detach"):].strip()
+            if not raw_id.isdigit():
+                ui.display("用法: /tasks detach <任务编号>")
+                return None
+            if manager.detach(int(raw_id)):
+                ui.display(f"任务 #{raw_id} 已切后台，完成后会通知主对话。")
+            else:
+                ui.display(f"任务 #{raw_id} 不存在或已结束，无法切换。")
+            return None
+        ui.display(render_task_list(manager.snapshot()))
+        return None
+
+    return cmd_tasks
+
+
+def register_tasks_command(registry: CommandRegistry, manager) -> None:
+    """登记 /tasks 命令（ch16 F8）；须任务管理器创建后调用（cli 装配层）。"""
+    registry.register(
+        CommandSpec(
+            name="tasks",
+            description="列出子 Agent 任务状态，或把同步任务切后台",
+            usage="/tasks [/tasks detach <id>]",
+            type=CommandType.LOCAL,
+            handler=make_tasks_handler(manager),
+        )
+    )
