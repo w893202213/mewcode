@@ -139,6 +139,7 @@ def run(
         memory_loader=memory.memory_loader if memory is not None else None,
         skills_summary=skills_summary,
         skill_manager=skill_manager,
+        hook_manager=hook_manager,  # ch15：主 Agent 接入 Hook
     )
     # ch11 F5：轮自然结束后异步更新记忆；提示经队列送回主线程打印
     notice_queue: queue.Queue[str] = queue.Queue()

@@ -26,7 +26,7 @@ from mewcode.agent.events import (
     UsageEvent,
 )
 from mewcode.agent.executor import execute_call
-from mewcode.hooks.manager import HookManager
+from mewcode.hooks.manager import HookDecision, HookManager
 # 注意：从子模块导入而非 mewcode.context 包级——包级导入 Compressor
 # 会经 agent.events 反向触发循环依赖（见 context/__init__.py 说明）
 from mewcode.context.compressor import Compressor
@@ -341,6 +341,24 @@ class Agent:
             )
         return RoundEnd(reason, message)
 
+    async def _check_hook_before(self, call: ToolCall) -> HookDecision:
+        """tool_before Hook（ch15 F4）：无 Hook 管理器直接放行。
+
+        闸门放行与人工应答放行两条路径都过此检查——补充策略不因
+        询问而旁路。
+        """
+        if self._hooks is None:
+            return HookDecision()
+        return await self._hooks.emit_async(
+            "tool_before",
+            {
+                "event": "tool_before",
+                "round": self._round_count,
+                "tool": call.name,
+                "args": call.args,
+            },
+        )
+
     async def _stream_bridged(
         self, messages: list, tools: list[Tool], system: SystemPrompt
     ) -> AsyncIterator[StreamEvent]:
@@ -554,18 +572,10 @@ class Agent:
                     if verdict.action is Action.DENY:
                         results[id(call)] = ToolResult.failure(verdict.reason)
                         continue
-                    if verdict.action is Action.ALLOW and self._hooks is not None:
+                    if verdict.action is Action.ALLOW:
                         # ch15 F4：Hook 拦截——闸门放行路径上的补充策略；
                         # 拒绝原因作为失败结果回灌，模型可据此调整
-                        decision = await self._hooks.emit_async(
-                            "tool_before",
-                            {
-                                "event": "tool_before",
-                                "round": self._round_count,
-                                "tool": call.name,
-                                "args": call.args,
-                            },
-                        )
+                        decision = await self._check_hook_before(call)
                         if not decision.allowed:
                             results[id(call)] = ToolResult.failure(decision.reason)
                             continue
@@ -576,6 +586,13 @@ class Agent:
                         self._pending = (fut, loop)
                         yield PermissionAskEvent(call, verdict.reason)
                         if await self._await_answer(fut):
+                            # 人工放行同样过 Hook（补充策略不因询问而旁路）
+                            decision = await self._check_hook_before(call)
+                            if not decision.allowed:
+                                results[id(call)] = ToolResult.failure(
+                                    decision.reason
+                                )
+                                continue
                             planned.append(call)
                         else:
                             results[id(call)] = ToolResult.failure(

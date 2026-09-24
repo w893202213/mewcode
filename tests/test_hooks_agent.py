@@ -5,7 +5,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from mewcode.agent.events import RoundEndReason, ToolResultEvent
+from mewcode.agent.events import PermissionAskEvent, RoundEndReason, ToolResultEvent
 from mewcode.agent.loop import Agent
 from mewcode.hooks.loader import HookAction, HookRule
 from mewcode.hooks.manager import HookManager
@@ -199,6 +199,53 @@ def test_inject_appears_in_next_request_once(tmp_path):
     # 第三轮请求不再出现（无下一次消费机会时文本自然丢弃）
     _collect(agent, "再读一次")
     assert "【注入】注意安全" not in provider.systems[2].dynamic
+
+
+def test_ask_allow_path_also_goes_through_hook(tmp_path):
+    """人工应答放行（ASK 路径）同样过 tool_before Hook——补充策略不旁路。
+
+    回归：e2e 曾发现 y 应答放行绕过 Hook 拦截（文件被删除）。
+    """
+    mark = tmp_path / "executed"
+    manager = HookManager([_rule("tool_before", "echo Hook已拦截; exit 1")])
+    session = ChatSession()
+
+    def handler(n, messages, tools):
+        if n == 1:
+            return [
+                ToolCall(
+                    id="t1",
+                    name="run_command",
+                    args={"command": f"touch {mark}"},
+                ),
+                Done(),
+            ]
+        return [PTextDelta("调整完成"), Done()]
+
+    # default 档：run_command（副作用）走 ASK 询问，应答放行后进 Hook 层
+    gate = PermissionGate(tmp_path.resolve(), RuleSet(), Mode.DEFAULT)
+    agent = Agent(
+        FakeProvider(handler),
+        create_registry(),
+        session,
+        gate=gate,
+        hook_manager=manager,
+    )
+
+    async def go():
+        events = []
+        async for event in agent.run("执行任务"):
+            events.append(event)
+            if isinstance(event, PermissionAskEvent):
+                agent.answer_permission(True)
+        return events
+
+    events = asyncio.run(go())
+    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(tool_results) == 1
+    assert "Hook已拦截" in tool_results[0].result.content
+    assert not mark.exists()  # 人工放行后被 Hook 拦截，工具未执行
+    assert events[-1].reason is RoundEndReason.OK
 
 
 def test_no_hook_manager_behavior_unchanged():
