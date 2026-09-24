@@ -280,7 +280,7 @@ def run(
                 summary = f"独立执行未完成: {end.message if end is not None else '已取消'}"
             console.print(
                 Panel(
-                    summary,
+                    Text(summary),  # 模型输出不解析 markup
                     title=f"[bold]技能 {name} 独立执行摘要[/bold]",
                     border_style="cyan",
                 )
@@ -315,7 +315,7 @@ def run(
                 session.add_user(notice)
                 console.print(
                     Panel(
-                        notice,
+                        Text(notice),  # 外部内容不解析 markup
                         title=f"[bold]子 Agent {task.id} {status}[/bold]",
                         border_style="green" if task.status is TaskStatus.DONE else "red",
                     )
@@ -637,7 +637,7 @@ def _print_end(console: Console, usage: dict[str, int | None], end: RoundEnd) ->
         console.print(Text("本轮 token: " + " · ".join(parts), style=_TIMER_STYLE))
     if end.reason is RoundEndReason.ERROR:
         console.print(
-            Panel(end.message or "请求失败", title="[bold red]请求失败[/bold red]", border_style="red")
+            Panel(Text(end.message or "请求失败"), title="[bold red]请求失败[/bold red]", border_style="red")
         )
     elif end.reason is RoundEndReason.CANCELLED:
         console.print(
@@ -649,7 +649,7 @@ def _print_end(console: Console, usage: dict[str, int | None], end: RoundEnd) ->
         )
     elif end.reason is RoundEndReason.LIMIT:
         console.print(
-            Panel(end.message, title="[bold yellow]已达迭代上限[/bold yellow]", border_style="yellow")
+            Panel(Text(end.message), title="[bold yellow]已达迭代上限[/bold yellow]", border_style="yellow")
         )
     elif end.reason is RoundEndReason.UNKNOWN_TOOL:
         console.print(
@@ -672,7 +672,7 @@ def _ask_user(console: Console, event: PermissionAskEvent, gate: PermissionGate)
         summary = summary[: _ARGS_SUMMARY_CHARS] + "…"
     console.print(
         Panel(
-            f"工具: {event.call.name}\n参数: {summary}\n原因: {event.reason}",
+            Text(f"工具: {event.call.name}\n参数: {summary}\n原因: {event.reason}"),
             title="[bold yellow]⚠ 需要权限确认[/bold yellow]",
             border_style="yellow",
         )
@@ -707,17 +707,29 @@ def _print_tool_call(console: Console, call) -> None:
 
 
 def _print_tool_result(console: Console, result) -> None:
-    """展示工具结果面板（成功绿/失败红，按显示上限截断）。"""
+    """展示工具结果面板（成功绿/失败红，按显示上限截断）。
+
+    内容包 Text（默认不解析 markup）——结果含 `[/bold]` 等字样时
+    Rich 不再误当标记解析（e2e 曾因此崩溃）。
+    """
     display = result.content
     if len(display) > _DISPLAY_RESULT_CHARS:
         display = display[: _DISPLAY_RESULT_CHARS] + f"\n…（终端显示截断，共 {len(result.content)} 字符）"
     if result.ok:
         console.print(
-            Panel(display, title="[bold green]工具结果[/bold green]", border_style="green")
+            Panel(
+                Text(display),
+                title="[bold green]工具结果[/bold green]",
+                border_style="green",
+            )
         )
     else:
         console.print(
-            Panel(display, title="[bold red]工具失败[/bold red]", border_style="red")
+            Panel(
+                Text(display),
+                title="[bold red]工具失败[/bold red]",
+                border_style="red",
+            )
         )
 
 
