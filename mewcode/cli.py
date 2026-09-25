@@ -23,7 +23,13 @@ from mewcode.config import (
 )
 from mewcode.hooks import HookManager, load_hooks
 from mewcode.mcp import McpManager, load_mcp_servers
-from mewcode.memory import build_memory_context, load_instructions
+from mewcode.memory import (
+    PROJECT_MEMORY_DIR,
+    USER_MEMORY_DIR,
+    build_memory_context,
+    load_instructions,
+)
+from mewcode.memory.recall import RecallMemoryTool
 from mewcode.permissions import PermissionGate, RuleSet
 from mewcode.provider import create_provider
 from mewcode.skills import BUILTIN_SKILLS_DIR
@@ -102,7 +108,8 @@ def main(argv: list[str] | None = None) -> None:
     规则工具名统一校验 → 命令注册中心（冲突即启动失败）→ 技能发现
     （警告不阻断）→ /skill 命令注册 → use_skill 注册 → 白名单启动校验
     （未知工具即退出）→ 三层指令加载 → 记忆上下文（创建/恢复会话 +
-    过期清理）→ startup Hook → TUI；退出时 shutdown Hook + 统一关闭
+    过期清理）→ ch17 召回工具注册 → startup Hook → TUI；退出时
+    shutdown Hook + 统一关闭
     全部 MCP 连接（终止子进程）。
     """
     args = _parse_args(argv)
@@ -171,6 +178,13 @@ def main(argv: list[str] | None = None) -> None:
     memory = build_memory_context(project_root, USER_DIR, args.resume)
     if memory.resume_summary:
         print(memory.resume_summary)
+
+    # ch17：召回工具（渐进式披露·方案 A）——按需取细节层笔记全文
+    registry.register(
+        RecallMemoryTool(
+            provider, USER_DIR / USER_MEMORY_DIR, project_root / PROJECT_MEMORY_DIR
+        )
+    )
 
     # ch16：角色发现（警告不阻断）→ 任务管理器 → agent 工具与 /tasks 注册
     agent_roles = discover_agents(project_root, USER_DIR, BUILTIN_AGENTS_DIR)

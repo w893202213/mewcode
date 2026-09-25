@@ -97,6 +97,12 @@ def parse_recall_response(text: str) -> list[RecallHit]:
                 continue
             if not isinstance(slug, str) or not slug:
                 continue
+            slug = slug.strip()
+            # LLM 可能把索引行的 `(name.md)` 整段抄成 slug：剥掉后缀
+            if slug.endswith(".md"):
+                slug = slug[:-3]
+            if not slug:
+                continue
             key = (scope, slug)
             if key in seen:
                 continue
