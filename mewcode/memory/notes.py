@@ -1,7 +1,7 @@
 """自动笔记：四分类笔记文件管理、索引读写与记忆块拼接（ch11 F5）。
 
 每条笔记一个带 frontmatter 的 Markdown 文件；每级目录一份 index.md
-索引（≤200 行 / 25KB）；记忆索引每轮请求前随系统提示注入。
+索引（≤100 行 / 12KB，ch17 瘦身）；记忆索引每轮请求前随系统提示注入。
 NoteUpdater 在轮自然结束后异步调 LLM 更新（单后台线程 + busy 跳过）。
 """
 
@@ -24,9 +24,9 @@ from mewcode.memory.prompts import (
 from mewcode.provider.base import Provider, SystemPrompt, TextDelta
 from mewcode.session import Message
 
-# 索引规模上限（超限写盘前截断）
-INDEX_MAX_LINES = 200
-INDEX_MAX_BYTES = 25 * 1024
+# 索引规模上限（超限写盘前截断；ch17 温和瘦身：200 行/25KB → 100 行/12KB）
+INDEX_MAX_LINES = 100
+INDEX_MAX_BYTES = 12 * 1024
 # 每条笔记全文进入 LLM 判定时的截断长度（字符）
 NOTE_CHARS_LIMIT = 1500
 # 合法 slug：小写字母/数字/连字符
@@ -107,7 +107,7 @@ class NoteManager:
         return slug
 
     def write_index(self, text: str) -> None:
-        """写 index.md；超 200 行取前 200 行、超 25KB 截到最后一个完整行。"""
+        """写 index.md；超 100 行取前 100 行、超 12KB 截到最后一个完整行。"""
         lines = text.splitlines()
         if len(lines) > INDEX_MAX_LINES:
             lines = lines[:INDEX_MAX_LINES]
