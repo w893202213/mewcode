@@ -37,3 +37,11 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local Claude configuration
+.claude/settings.local.json
+
+# Mewcode local runtime state
+.mewcode/context/
+.mewcode/sessions/
+.mewcode/permissions.local.yaml
