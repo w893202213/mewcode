@@ -6,7 +6,12 @@ tests/test_agent_loop.py 的循环测试与 e2e 场景承接。
 
 from rich.console import Console
 
-from mewcode.tui.app import ThinkingIndicator, _stream_renderable
+from mewcode.tui.app import (
+    ThinkingIndicator,
+    _max_live_lines,
+    _split_markdown_blocks,
+    _stream_renderable,
+)
 
 
 class FakeClock:
@@ -67,3 +72,30 @@ def test_stream_renderable_reply_started():
     out = _render_text(_stream_renderable("让我想想", "你好呀", indicator))
     assert "thinking…" not in out
     assert "你好呀" in out
+
+
+def test_split_markdown_blocks_basic():
+    """空行切块；块间空行被消耗。"""
+    assert _split_markdown_blocks("第一块\n\n第二块") == ["第一块", "第二块"]
+    assert _split_markdown_blocks("只有一块") == ["只有一块"]
+    assert _split_markdown_blocks("") == []
+
+
+def test_split_markdown_blocks_fence_kept_whole():
+    """代码围栏内的空行不切块：围栏是整体，围栏后的块照常切。"""
+    assert _split_markdown_blocks("```python\n\na = 1\n\nprint(a)\n```\n\n说明文字") == [
+        "```python\n\na = 1\n\nprint(a)\n```",
+        "说明文字",
+    ]
+
+
+def test_split_markdown_blocks_blank_lines_at_edges():
+    """首尾空行不产生空块。"""
+    assert _split_markdown_blocks("\n\n正文\n\n") == ["正文"]
+
+
+def test_max_live_lines_clamp():
+    """高度上限：终端高度留 2 行余量，且不低于 8 行。"""
+    assert _max_live_lines(Console(record=True, height=25)) == 23
+    assert _max_live_lines(Console(record=True, height=5)) == 8
+    assert _max_live_lines(Console(record=True, height=None)) == 23
