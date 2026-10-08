@@ -45,3 +45,7 @@ Thumbs.db
 .mewcode/context/
 .mewcode/sessions/
 .mewcode/permissions.local.yaml
+
+# Docker runtime data and local Compose configuration
+runtime/
+.env
