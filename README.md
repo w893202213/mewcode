@@ -75,6 +75,20 @@ MewCode 是终端程序，在线体验通过 **GitHub Codespaces** 提供：在�
 > Codespaces 环境是隔离的，闲置后会自动停止；API key 由访客自备，不会消耗项目作者的额度。
 > 获取 key：[DeepSeek](https://platform.deepseek.com/api_keys) · [Anthropic](https://console.anthropic.com/settings/keys)
 
+### 终端无法粘贴 key？
+
+Codespaces 的终端运行在浏览器里，按 `Ctrl+V` 时 VS Code Web 会调用浏览器的剪贴板读取接口；如果浏览器没有授予该权限，就会提示「无法从浏览器的剪贴板中读取」。这不是 MewCode 的问题，可以：
+
+- 在浏览器地址栏左侧的站点设置里允许 **Clipboard / 剪贴板读取**，然后刷新页面；
+- 或用右键 → Paste（部分浏览器走原生粘贴事件，不受该权限限制）；
+- 或完全绕开终端粘贴：在左侧文件树新建 `mewcode-key.txt`，把 key 粘贴进去并保存（编辑器的粘贴不受终端限制），然后运行：
+
+  ```bash
+  bash scripts/setup-codespace-config.sh --provider deepseek --key-file mewcode-key.txt --non-interactive
+  ```
+
+  脚本写入 `~/.mewcode/config.yaml` 后会自动删除 `mewcode-key.txt`。用 Anthropic 时把 `--provider` 换成 `anthropic`。
+
 ---
 
 ## 功能特性

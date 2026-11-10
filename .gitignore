@@ -52,3 +52,6 @@ runtime/
 
 # MewCode 本地记忆（运行态，不入库）
 .mewcode/memory/
+
+# Codespaces 临时 key 文件（配置脚本会自动删除）
+mewcode-key.txt
