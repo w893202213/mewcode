@@ -14,6 +14,8 @@ MewCode 是一个类似 Claude Code 的终端编程 Agent：在终端里用自�
 
 ## 演示
 
+![MewCode 演示](docs/assets/demo.svg)
+
 > 一次真实会话：写文件 → 权限确认 → 执行 → 总结。
 
 <details>
