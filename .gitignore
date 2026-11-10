@@ -49,3 +49,6 @@ Thumbs.db
 # Docker runtime data and local Compose configuration
 runtime/
 .env
+
+# MewCode 本地记忆（运行态，不入库）
+.mewcode/memory/

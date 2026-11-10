@@ -6,6 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "mewcode"
 version = "0.1.0"
 description = "终端 AI 编程助手（类似 Claude Code）"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Lizhou Wang" }]
 requires-python = ">=3.10"
 dependencies = [
     "prompt_toolkit>=3.0",
