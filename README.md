@@ -10,9 +10,25 @@
 
 MewCode 是一个类似 Claude Code 的终端编程 Agent：在终端里用自然语言描述任务，它会读取代码、搜索文件、执行命令、修改代码，并在每一步有副作用的操作前向你确认。项目不依赖 LangChain 等 Agent 框架，核心循环、工具协议、权限闸门、上下文管理、MCP 客户端与记忆系统全部从零实现。
 
+## Contents
+
+- [Demo](#demo)
+- [Try Online](#try-online)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+- [Advanced Configuration](#advanced-configuration)
+- [Project Structure](#project-structure)
+- [Testing](#testing)
+- [Design Docs](#design-docs)
+- [Engineering Metrics](#engineering-metrics)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+
 ---
 
-## 演示
+## Demo
 
 ![MewCode 演示](docs/assets/demo.gif)
 
@@ -26,15 +42,23 @@ MewCode 是一个类似 Claude Code 的终端编程 Agent：在终端里用自�
 
 🐱 MewCode
 第 1 轮
-🔧 write_file  {"path": "fizzbuzz.py", "content": "..."}
+🔧 write_file {"file_path": "fizzbuzz.py", "content": "..."}
 
-╭──────────────────────── ⚠ 需要权限确认 ────────────────────────╮
-│ 工具: write_file                                                │
-│ 原因: 默认模式：有副作用的工具需要人工确认                      │
-╰─────────────────────────────────────────────────────────────────╯
-  [y] 本次允许  [s] 本会话允许  [a] 永久允许  [n] 拒绝 >
+⚠ 需要权限确认
+工具: write_file
+原因: 默认模式：有副作用的工具需要人工确认
+  [y] 本次允许  [s] 本会话允许  [a] 永久允许  [n] 拒绝 > s
 
-🔧 run_command  {"command": "python3 fizzbuzz.py"}
+✅ 已写入 fizzbuzz.py（309 字节）
+
+第 2 轮
+🔧 run_command {"command": "python3 fizzbuzz.py"}
+
+⚠ 需要权限确认
+工具: run_command
+原因: 默认模式：有副作用的工具需要人工确认
+  [y] 本次允许  [s] 本会话允许  [a] 永久允许  [n] 拒绝 > s
+
 1
 2
 Fizz
@@ -75,7 +99,7 @@ MewCode 是终端程序，在线体验通过 **GitHub Codespaces** 提供：在�
 > Codespaces 环境是隔离的，闲置后会自动停止；API key 由访客自备，不会消耗项目作者的额度。
 > 获取 key：[DeepSeek](https://platform.deepseek.com/api_keys) · [Anthropic](https://console.anthropic.com/settings/keys)
 
-### 终端无法粘贴 key？
+### Can't Paste the API Key?
 
 Codespaces 的终端运行在浏览器里，按 `Ctrl+V` 时 VS Code Web 会调用浏览器的剪贴板读取接口；如果浏览器没有授予该权限，就会提示「无法从浏览器的剪贴板中读取」。这不是 MewCode 的问题，可以：
 
@@ -88,10 +112,11 @@ Codespaces 的终端运行在浏览器里，按 `Ctrl+V` 时 VS Code Web 会调�
   ```
 
   脚本写入 `~/.mewcode/config.yaml` 后会自动删除 `mewcode-key.txt`。用 Anthropic 时把 `--provider` 换成 `anthropic`。
+- 也可以把 key 存成 Codespaces Secret：GitHub → **Settings → Codespaces → Secrets** → 新建 `MEWCODE_API_KEY`，然后运行 `bash scripts/setup-codespace-config.sh --provider deepseek --non-interactive`，脚本会直接读取该环境变量。
 
 ---
 
-## 功能特性
+## Features
 
 | 模块 | 能力 |
 |---|---|
@@ -110,7 +135,7 @@ Codespaces 的终端运行在浏览器里，按 `Ctrl+V` 时 VS Code Web 会调�
 
 ---
 
-## 架构
+## Architecture
 
 ```mermaid
 flowchart TD
@@ -142,9 +167,9 @@ flowchart TD
 
 ---
 
-## 快速开始
+## Quick Start
 
-### 1. 安装
+### 1. Installation
 
 ```bash
 git clone https://github.com/w893202213/mewcode.git
@@ -157,7 +182,7 @@ pip install -e ".[dev]"
 
 要求 Python 3.10+。
 
-### 2. 配置模型
+### 2. Configure a Model
 
 MewCode 支持 Anthropic 与 OpenAI 兼容协议。复制示例配置并填入自己的 key：
 
@@ -198,7 +223,7 @@ mewcode --profile deepseek
 mewcode --config /path/to/config.yaml
 ```
 
-### 3. 启动
+### 3. Run
 
 ```bash
 mewcode
@@ -221,7 +246,7 @@ mewcode --resume            # 恢复最近一个会话
 mewcode --resume <session_id>
 ```
 
-### 4. Docker（可选）
+### 4. Docker (Optional)
 
 ```bash
 docker compose build
@@ -232,9 +257,9 @@ docker compose run --rm mewcode
 
 ---
 
-## 使用示例
+## Usage
 
-### 自然语言任务
+### Natural-Language Tasks
 
 ```text
 ❯ 找出这个项目里所有 TODO，按文件分组，并挑一个最容易修的修掉
@@ -254,7 +279,7 @@ docker compose run --rm mewcode
   [y] 本次允许  [s] 本会话允许  [a] 永久允许  [n] 拒绝 >
 ```
 
-### 权限模式
+### Permission Modes
 
 | 模式 | 行为 |
 |---|---|
@@ -264,7 +289,7 @@ docker compose run --rm mewcode
 
 用 `/permission` 循环切换，或在配置文件的 `permissions` 段声明规则。
 
-### 计划模式
+### Plan Mode
 
 ```text
 ❯ /plan
@@ -277,7 +302,7 @@ docker compose run --rm mewcode
 已退出计划模式
 ```
 
-### 常用斜杠命令
+### Slash Commands
 
 | 命令 | 作用 |
 |---|---|
@@ -296,7 +321,7 @@ docker compose run --rm mewcode
 
 ---
 
-## 配置进阶
+## Advanced Configuration
 
 ### MCP Server
 
@@ -344,7 +369,7 @@ hooks:
 - 动作：`command` / `inject` / `http` / `agent`
 - `tool_before` 上的非零退出或非 2xx 会作为拒绝原因回灌给模型
 
-### 子 Agent 角色
+### SubAgent Roles
 
 在 `.mewcode/agents/` 下放一个 Markdown + frontmatter 即可定义角色：
 
@@ -363,27 +388,32 @@ permission: accept
 
 ---
 
-## 项目结构
+## Project Structure
 
 ```text
 mewcode/
+├── .devcontainer/          # Codespaces 开发容器
+├── .github/workflows/      # CI（pytest）
+├── .mewcode/agents/        # 项目级子 Agent 角色
 ├── mewcode/
-│   ├── agent/          # ReAct 循环、事件流、工具执行器
-│   ├── agents/         # SubAgent 角色发现、管理器、上下文隔离
-│   ├── commands/       # 斜杠命令注册与分发
-│   ├── context/        # token 估算、上下文压缩、会话存储
-│   ├── hooks/          # 生命周期事件、条件匹配、四种动作
-│   ├── mcp/            # MCP 配置、协议、stdio/HTTP 传输、工具适配
-│   ├── memory/         # 指令文件、会话存档、笔记、回忆工具
-│   ├── permissions/    # 黑名单、沙箱、规则、权限闸门
-│   ├── prompt/         # 系统提示模块化组装
-│   ├── provider/       # Anthropic / OpenAI 协议与流式解析
-│   ├── skills/         # 技能发现、加载、执行
-│   ├── tools/          # 内置工具与注册表
-│   └── tui/            # prompt_toolkit + rich 终端界面
-├── tests/              # 62 个测试文件，745 个用例
-├── docs/ch01..ch17/    # 每章 spec / plan / task / checklist
-├── scripts/            # 演示与辅助脚本
+│   ├── agent/              # ReAct 循环、事件流、工具执行器
+│   ├── agents/             # SubAgent 角色发现、管理器、上下文隔离
+│   ├── commands/           # 斜杠命令注册与分发
+│   ├── context/            # token 估算、上下文压缩、会话存储
+│   ├── hooks/              # 生命周期事件、条件匹配、四种动作
+│   ├── mcp/                # MCP 配置、协议、stdio/HTTP 传输、工具适配
+│   ├── memory/             # 指令文件、会话存档、笔记、回忆工具
+│   ├── permissions/        # 黑名单、沙箱、规则、权限闸门
+│   ├── prompt/             # 系统提示模块化组装
+│   ├── provider/           # Anthropic / OpenAI 协议与流式解析
+│   ├── skills/             # 技能发现、加载、执行
+│   ├── tools/              # 内置工具与注册表
+│   └── tui/                # prompt_toolkit + rich 终端界面
+├── docs/
+│   ├── assets/             # README 演示 GIF
+│   └── ch01..ch17/         # 每章 spec / plan / task / checklist
+├── scripts/                # Codespaces 配置向导等
+├── tests/                  # 62 个测试文件，745 个用例
 ├── config.example.yaml
 ├── Dockerfile
 ├── compose.yaml
@@ -405,7 +435,7 @@ pytest -q
 
 测试覆盖 Agent 循环、工具执行、权限五层、MCP 协议与传输、上下文压缩、记忆召回、Hook 条件与动作、SubAgent 生命周期、TUI 关键路径等。
 
-## 设计文档
+## Design Docs
 
 项目采用 spec-driven 开发：每个功能先写四份文档，再实现与验收。
 
@@ -419,7 +449,7 @@ docs/chXX/
 
 17 章覆盖：TUI 对话 → 工具系统 → Agent Loop → 系统提示 → 五层权限 → MCP → 上下文管理 → 记忆 → 斜杠命令 → 技能 → Hook → SubAgent → 记忆渐进式披露。
 
-## 工程数据
+## Engineering Metrics
 
 | 指标 | 数值 |
 |---|---|
@@ -429,6 +459,20 @@ docs/chXX/
 | 设计文档 | 17 章、68 个 Markdown 文件 |
 | 内置工具 | 7 个 |
 | Hook 事件 | 10 个 |
+
+## Troubleshooting
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| `配置错误: ... unacceptable character #x001b` | 粘贴的 API key 带入了终端转义序列（ESC） | 用 `--key-file` 流程，或重新复制纯文本 key；配置脚本会清洗控制字符 |
+| `鉴权失败：api_key 无效或无权限（HTTP 401）` | key 无效/过期，或协议与服务商不匹配 | 检查 key 和 `base_url`；DeepSeek 使用 `protocol: openai` |
+| `protocol: anthropic` 配 `api.deepseek.com` | DeepSeek 不是 Anthropic 协议 | 改用 `protocol: openai`，或运行 `--provider deepseek` |
+| `mewcode: command not found` | 控制台脚本不在 PATH | 使用 `python -m mewcode`，或重新 `pip install -e ".[dev]"` |
+| 「无法从浏览器的剪贴板中读取」 | 浏览器未授予剪贴板读取权限 | 授权/右键粘贴，或用 `--key-file`（见 Try Online） |
+| Codespace 首次启动较慢 | 容器构建 + 依赖安装 | 等待 1–2 分钟；后续启动会快很多 |
+| `ModuleNotFoundError: No module named 'mewcode'` | 项目未安装 | 在仓库根目录运行 `pip install -e ".[dev]"` |
+
+> 配置文件位置：本地为 `~/.mewcode/config.yaml`；Codespaces 中为 `/home/vscode/.mewcode/config.yaml`。
 
 ## License
 
