@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![CI](https://github.com/w893202213/mewcode/actions/workflows/ci.yml/badge.svg)](https://github.com/w893202213/mewcode/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-745%20passed-brightgreen.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-745%20passed-brightgreen.svg)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/w893202213/mewcode)
 
@@ -46,6 +46,34 @@ Buzz
 ```
 
 </details>
+
+---
+
+## Try Online
+
+MewCode 是终端程序，在线体验通过 **GitHub Codespaces** 提供：在浏览器里启动一个隔离的云端终端，不用本地安装。
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/w893202213/mewcode)
+
+1. 点击上面的徽章（需要 GitHub 账号），等待环境创建完成（首次约 1–2 分钟）。
+2. 在终端里运行配置向导，填入你自己的 API key：
+
+   ```bash
+   bash scripts/setup-codespace-config.sh
+   ```
+
+3. 启动 MewCode：
+
+   ```bash
+   python -m mewcode
+   ```
+
+   （如果 `mewcode` 命令已在 PATH 中，也可以直接运行 `mewcode`。）
+
+4. 试试输入：`用 Python 写一个快速排序并运行测试`。
+
+> Codespaces 环境是隔离的，闲置后会自动停止；API key 由访客自备，不会消耗项目作者的额度。
+> 获取 key：[DeepSeek](https://platform.deepseek.com/api_keys) · [Anthropic](https://console.anthropic.com/settings/keys)
 
 ---
 
@@ -187,17 +215,6 @@ docker compose run --rm mewcode
 ```
 
 `compose.yaml` 会把 `runtime/user` 挂到容器内 `~/.mewcode`、`runtime/workspace` 挂到 `/workspace`。首次使用前把配置文件放到 `runtime/user/config.yaml`。
-
-### 5. 在线体验（GitHub Codespaces）
-
-点击仓库顶部的 **Open in GitHub Codespaces** 徽章，GitHub 会在云端启动一个隔离的浏览器 IDE。首次启动会自动安装依赖，然后在终端里执行：
-
-```bash
-bash scripts/setup-codespace-config.sh   # 按提示输入你自己的 API key
-mewcode
-```
-
-Codespaces 使用你自己的 API key 与额度，不会消耗项目作者的额度。
 
 ---
 
@@ -361,7 +378,7 @@ mewcode/
 
 ---
 
-## 测试
+## Testing
 
 ```bash
 pip install -e ".[dev]"
