@@ -3,18 +3,16 @@
 > 用 Python 从零实现的终端 AI 编程助手 —— 自研 Agent Loop、工具系统、五层权限、MCP、记忆与 SubAgent。
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![CI](https://github.com/YOUR_GITHUB_USER/mewcode/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_GITHUB_USER/mewcode/actions/workflows/ci.yml)
+[![CI](https://github.com/w893202213/mewcode/actions/workflows/ci.yml/badge.svg)](https://github.com/w893202213/mewcode/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-745%20passed-brightgreen.svg)](#测试)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/YOUR_GITHUB_USER/mewcode)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/w893202213/mewcode)
 
 MewCode 是一个类似 Claude Code 的终端编程 Agent：在终端里用自然语言描述任务，它会读取代码、搜索文件、执行命令、修改代码，并在每一步有副作用的操作前向你确认。项目不依赖 LangChain 等 Agent 框架，核心循环、工具协议、权限闸门、上下文管理、MCP 客户端与记忆系统全部从零实现。
 
 ---
 
 ## 演示
-
-![MewCode 演示](docs/assets/demo.gif)
 
 > 一次真实会话：写文件 → 权限确认 → 执行 → 总结。
 
@@ -105,7 +103,7 @@ flowchart TD
 ### 1. 安装
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/mewcode.git
+git clone https://github.com/w893202213/mewcode.git
 cd mewcode
 
 python3 -m venv .venv

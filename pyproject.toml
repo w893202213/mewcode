@@ -20,6 +20,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
+[project.urls]
+Homepage = "https://github.com/w893202213/mewcode"
+Repository = "https://github.com/w893202213/mewcode"
+
 [project.scripts]
 mewcode = "mewcode.cli:main"
 
