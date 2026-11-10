@@ -56,7 +56,7 @@ MewCode 是终端程序，在线体验通过 **GitHub Codespaces** 提供：在�
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/w893202213/mewcode)
 
 1. 点击上面的徽章（需要 GitHub 账号），等待环境创建完成（首次约 1–2 分钟）。
-2. 在终端里运行配置向导，填入你自己的 API key：
+2. 在终端里运行配置向导（DeepSeek 选 1，Anthropic 选 2），填入你自己的 API key：
 
    ```bash
    bash scripts/setup-codespace-config.sh
